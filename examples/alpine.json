@@ -1,0 +1,10 @@
+{
+  "modules": {
+    "alpine": {
+      "enabled": true
+    }
+  },
+  "auth_log": "",
+  "watch": [],
+  "listen_allow": []
+}

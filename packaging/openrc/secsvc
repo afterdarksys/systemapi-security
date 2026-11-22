@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+name="secsvc"
+description="Local host security monitoring service"
+command="/usr/local/bin/secsvc"
+command_args="serve --dir /var/lib/secsvc --pub /etc/secsvc/pub.hex --host ${secsvc_host} --socket /run/secsvc/sock --interval 30s"
+command_user="root:root"
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=5
+respawn_period=60
+
+depend() {
+    need localmount
+    use net
+}
+
+start_pre() {
+    # Host grammar matches the daemon; do not interpolate arbitrary arguments.
+    case "${secsvc_host}" in
+        ""|*[!a-z0-9.-]*) eerror "Set secsvc_host in /etc/conf.d/secsvc"; return 1 ;;
+    esac
+    checkpath --directory --mode 0700 --owner root:root /var/lib/secsvc || return 1
+    checkpath --directory --mode 0750 --owner root:root /run/secsvc || return 1
+    umask 0077
+}

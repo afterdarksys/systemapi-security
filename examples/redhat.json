@@ -1,0 +1,10 @@
+{
+  "modules": {
+    "redhat": {
+      "enabled": true
+    }
+  },
+  "auth_log": "",
+  "watch": [],
+  "listen_allow": []
+}

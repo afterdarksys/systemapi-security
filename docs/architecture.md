@@ -47,6 +47,8 @@ Header `X-Secsvc-Grant`. One value. Body cap 64 KiB. Header cap 32 KiB. Read hea
 | `PUT` | `/v1/config` | `security.config` |
 | `PUT` | `/v1/contact` | `security.notify` |
 | `GET` | `/v1/findings` | `security.read` |
+| `GET` | `/v1/modules` | `security.read` |
+| `GET` | `/v1/report` | `security.read` |
 | `POST` | `/v1/scan` | `security.scan` |
 | `GET` | `/v1/status` | `security.read` |
 
@@ -76,7 +78,7 @@ Mode `0700`. Files are mode `0600`.
 
 | file | contents |
 | --- | --- |
-| `config.json` | `auth_log`, `auth_fail_limit`, `auth_window_s`, `watch`, `listen_allow` |
+| `config.json` | `auth_log`, `auth_fail_limit`, `auth_window_s`, `watch`, `listen_allow`, `modules` |
 | `contact` | the ntfy contact string |
 | `baseline.json` | SHA-256 records for watched paths |
 | `ids-state.json` | offsets, open findings, coalesce times, last scan |
@@ -119,3 +121,17 @@ The contact form is the same string `notices.js` accepts: `push:ntfy:https://ntf
 ## Fail closed
 
 A bad grant, a bad path, a bad contact, a blocked address, a broken audit chain, and a failed spend return an error and leave the previous state in place. The scan loop does not save detector memory when the audit append fails, so the next scan retries the page. Socket mode is not authentication. The process logs stable codes and does not log seeds, grant documents, or contact URLs.
+
+## Distro modules and report snapshots
+
+See [modules.md](modules.md) for the module registry, fixed read surfaces,
+authorization, coverage states, and the `secsvc-report/1` contract. Module
+results and detector-config fingerprints are persisted with `ids-state.json`.
+Explicitly disabling a module/check writes `ids.withdrawn` for removed findings;
+incomplete checks retain prior findings. Status includes `system` and
+`config_changed`; the original capability registry remains unchanged.
+
+`OpenRec` now stores first/last seen times and whether a finding was observed in
+the last scan. Old state without these additive fields remains readable. Older
+binaries use strict state parsing, so downgrade requires an explicit state
+migration/backup plan; do not overwrite the new state with an older binary.

@@ -1,0 +1,27 @@
+[Unit]
+Description=Local host security monitoring service
+After=local-fs.target network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/secsvc/service.env
+ExecStart=/usr/local/bin/secsvc serve --dir /var/lib/secsvc --pub /etc/secsvc/pub.hex --host ${SECSVC_HOST} --socket /run/secsvc/sock --interval 30s
+User=root
+Group=root
+RuntimeDirectory=secsvc
+RuntimeDirectoryMode=0750
+StateDirectory=secsvc
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/secsvc /run/secsvc
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Retain the host network namespace and PID 1 mount view for detectors.
+# PrivateTmp/PrivateNetwork would make these views misleading.
+
+[Install]
+WantedBy=multi-user.target

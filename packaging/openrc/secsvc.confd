@@ -1,0 +1,2 @@
+# Must match the host carried by signed secsvc grants.
+secsvc_host="replace-with-host-name"

@@ -30,6 +30,7 @@ import (
 	"github.com/afterdarksys/systemapi-security/internal/engine"
 	"github.com/afterdarksys/systemapi-security/internal/grant"
 	"github.com/afterdarksys/systemapi-security/internal/ids"
+	"github.com/afterdarksys/systemapi-security/internal/modules"
 	"github.com/afterdarksys/systemapi-security/internal/notify"
 	"github.com/afterdarksys/systemapi-security/internal/paths"
 	"github.com/afterdarksys/systemapi-security/internal/store"
@@ -124,6 +125,8 @@ func routeTable() []route {
 		{http.MethodGet, "/v1/findings", grant.EntRead},
 		{http.MethodPost, "/v1/scan", grant.EntScan},
 		{http.MethodGet, "/v1/status", grant.EntRead},
+		{http.MethodGet, "/v1/modules", grant.EntRead},
+		{http.MethodGet, "/v1/report", grant.EntRead},
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].Path != rows[j].Path {
@@ -185,6 +188,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch rt.Path {
 	case "/v1/catalog":
 		s.catalog(w)
+	case "/v1/modules":
+		p, c := modules.Catalog()
+		writeJSON(w, http.StatusOK, struct {
+			Profiles []modules.Profile `json:"profiles"`
+			Checks   []modules.Check   `json:"checks"`
+		}{p, c})
+	case "/v1/report":
+		s.writeCall(w, func() (any, error) { return s.Eng.Report() })
 	case "/v1/status":
 		s.writeCall(w, func() (any, error) { return s.Eng.Status() })
 	case "/v1/config":

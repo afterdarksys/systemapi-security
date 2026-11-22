@@ -294,7 +294,12 @@ func TestCallAgainstServe(t *testing.T) {
 	}
 	want(t, out, errb, []string{"call", "status", "--socket", sock, "--grant", empty}, 1, "grant_missing\n")
 
-	tampered := bytes.Replace(mustRead(t, grantPath), []byte("A"), []byte("B"), 1)
+	// Change a signed field deterministically. Replacing a random base64
+	// character sometimes left the original document untouched.
+	tampered := bytes.Replace(mustRead(t, grantPath), []byte(`"actor":"ops"`), []byte(`"actor":"tampered"`), 1)
+	if bytes.Equal(tampered, mustRead(t, grantPath)) {
+		t.Fatal("grant was not tampered")
+	}
 	bad := filepath.Join(dir, "bad")
 	if err := os.WriteFile(bad, tampered, 0o600); err != nil {
 		t.Fatal(err)

@@ -28,6 +28,7 @@ import (
 	"github.com/afterdarksys/systemapi-security/internal/audit"
 	"github.com/afterdarksys/systemapi-security/internal/codes"
 	"github.com/afterdarksys/systemapi-security/internal/ids"
+	"github.com/afterdarksys/systemapi-security/internal/modules"
 	"github.com/afterdarksys/systemapi-security/internal/paths"
 	"golang.org/x/sys/unix"
 )
@@ -49,41 +50,48 @@ var ErrNone = errors.New("none")
 
 // Config is the host detector configuration. The contact is not in this file.
 type Config struct {
-	AuthLog       string   `json:"auth_log"`
-	AuthFailLimit int      `json:"auth_fail_limit"`
-	AuthWindowS   int      `json:"auth_window_s"`
-	Watch         []string `json:"watch"`
-	ListenAllow   []string `json:"listen_allow"`
+	Modules       map[string]modules.Config `json:"modules,omitempty"`
+	AuthLog       string                    `json:"auth_log"`
+	AuthFailLimit int                       `json:"auth_fail_limit"`
+	AuthWindowS   int                       `json:"auth_window_s"`
+	Watch         []string                  `json:"watch"`
+	ListenAllow   []string                  `json:"listen_allow"`
 }
 
 // ConfigView is the GET body. ContactSHA256 is a fingerprint, never the URL.
 type ConfigView struct {
-	AuthLog       string   `json:"auth_log"`
-	AuthFailLimit int      `json:"auth_fail_limit"`
-	AuthWindowS   int      `json:"auth_window_s"`
-	Watch         []string `json:"watch"`
-	ListenAllow   []string `json:"listen_allow"`
-	ContactSHA256 string   `json:"contact_sha256"`
-	ContactState  string   `json:"contact_state"`
+	Modules       map[string]modules.Config `json:"modules"`
+	AuthLog       string                    `json:"auth_log"`
+	AuthFailLimit int                       `json:"auth_fail_limit"`
+	AuthWindowS   int                       `json:"auth_window_s"`
+	Watch         []string                  `json:"watch"`
+	ListenAllow   []string                  `json:"listen_allow"`
+	ContactSHA256 string                    `json:"contact_sha256"`
+	ContactState  string                    `json:"contact_state"`
 }
 
 // OpenRec is one open finding remembered across scans.
 type OpenRec struct {
-	Kind     string `json:"kind"`
-	Severity string `json:"severity"`
-	Subject  string `json:"subject"`
-	Summary  string `json:"summary"`
-	Paged    bool   `json:"paged"`
+	FirstSeen string `json:"first_seen,omitempty"`
+	LastSeen  string `json:"last_seen,omitempty"`
+	Observed  bool   `json:"observed"`
+	Kind      string `json:"kind"`
+	Severity  string `json:"severity"`
+	Subject   string `json:"subject"`
+	Summary   string `json:"summary"`
+	Paged     bool   `json:"paged"`
 }
 
 // IDSState is the detector memory. Map keys may contain a NUL.
 type IDSState struct {
-	AuthOffset int64              `json:"auth_offset"`
-	AuthEvents []int64            `json:"auth_events"`
-	Open       map[string]OpenRec `json:"open"`
-	LastScan   string             `json:"last_scan"`
-	Coalesce   map[string]int64   `json:"coalesce"`
-	Listen     string             `json:"listen"`
+	System       modules.Snapshot   `json:"system"`
+	ConfigSHA256 string             `json:"config_sha256"`
+	AuthOffset   int64              `json:"auth_offset"`
+	AuthEvents   []int64            `json:"auth_events"`
+	Open         map[string]OpenRec `json:"open"`
+	LastScan     string             `json:"last_scan"`
+	Coalesce     map[string]int64   `json:"coalesce"`
+	Listen       string             `json:"listen"`
 }
 
 type spentFile struct {
@@ -198,6 +206,7 @@ func (s *Store) View() (ConfigView, error) {
 		return ConfigView{}, err
 	}
 	v := ConfigView{
+		Modules: modules.CloneConfig(s.cfg.Modules),
 		AuthLog: s.cfg.AuthLog, AuthFailLimit: s.cfg.AuthFailLimit, AuthWindowS: s.cfg.AuthWindowS,
 		Watch: append([]string(nil), s.cfg.Watch...), ListenAllow: append([]string(nil), s.cfg.ListenAllow...),
 		ContactState: "off",
@@ -442,6 +451,10 @@ func DecodeConfig(body []byte) (Config, error) {
 
 // Normalize applies defaults and rejects a config that cannot be stored.
 func Normalize(c Config) (Config, error) {
+	if err := modules.Validate(c.Modules); err != nil {
+		return Config{}, codes.E(codes.BadPath)
+	}
+	c.Modules = modules.CloneConfig(c.Modules)
 	var err error
 	c.AuthFailLimit, err = normLimit(c.AuthFailLimit, defFailLimit, 1, 1000)
 	if err != nil {
@@ -496,6 +509,9 @@ func Normalize(c Config) (Config, error) {
 func AllowChange(old, neu Config, covers func(string) bool) bool {
 	if covers == nil {
 		covers = func(string) bool { return false }
+	}
+	if !modules.ChangeAllowed(old.Modules, neu.Modules, covers) {
+		return false
 	}
 	if old.AuthLog != neu.AuthLog {
 		if old.AuthLog != "" && !covers(old.AuthLog) {
@@ -897,6 +913,7 @@ func syncDir(dir string) error {
 
 func cloneConfig(c Config) Config {
 	out := c
+	out.Modules = modules.CloneConfig(c.Modules)
 	out.Watch = append([]string{}, c.Watch...)
 	out.ListenAllow = append([]string{}, c.ListenAllow...)
 	if out.Watch == nil {
@@ -918,6 +935,7 @@ func cloneBase(m map[string]ids.Record) map[string]ids.Record {
 
 func cloneIDS(st IDSState) IDSState {
 	st = fillIDS(st)
+	st.System = modules.CloneSnapshot(st.System)
 	ev := append([]int64{}, st.AuthEvents...)
 	open := make(map[string]OpenRec, len(st.Open))
 	for k, v := range st.Open {

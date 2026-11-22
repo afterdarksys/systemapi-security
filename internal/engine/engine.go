@@ -24,6 +24,7 @@ import (
 	"github.com/afterdarksys/systemapi-security/internal/caps"
 	"github.com/afterdarksys/systemapi-security/internal/codes"
 	"github.com/afterdarksys/systemapi-security/internal/ids"
+	"github.com/afterdarksys/systemapi-security/internal/modules"
 	"github.com/afterdarksys/systemapi-security/internal/notify"
 	"github.com/afterdarksys/systemapi-security/internal/store"
 	"golang.org/x/sys/unix"
@@ -39,12 +40,14 @@ const (
 
 // Status is the GET /v1/status body.
 type Status struct {
-	Host         string        `json:"host"`
-	LastScan     string        `json:"last_scan"`
-	Armed        Armed         `json:"armed"`
-	Listen       string        `json:"listen"`
-	OpenFindings int           `json:"open_findings"`
-	Caps         []caps.Result `json:"caps"`
+	System        modules.Snapshot `json:"system"`
+	ConfigChanged bool             `json:"config_changed"`
+	Host          string           `json:"host"`
+	LastScan      string           `json:"last_scan"`
+	Armed         Armed            `json:"armed"`
+	Listen        string           `json:"listen"`
+	OpenFindings  int              `json:"open_findings"`
+	Caps          []caps.Result    `json:"caps"`
 }
 
 // Armed reports which detectors have a target configured.
@@ -56,13 +59,14 @@ type Armed struct {
 
 // Engine is the host scanner. Scan and the API share mu.
 type Engine struct {
-	mu     sync.Mutex
-	Store  *store.Store
-	Host   string
-	Now    func() time.Time
-	Sender *notify.Sender
-	Proc   func() (tcp, tcp6 string, oversize bool, err error)
-	Log    func(code string)
+	SystemFS modules.Reader
+	mu       sync.Mutex
+	Store    *store.Store
+	Host     string
+	Now      func() time.Time
+	Sender   *notify.Sender
+	Proc     func() (tcp, tcp6 string, oversize bool, err error)
+	Log      func(code string)
 }
 
 func (e *Engine) now() time.Time {
@@ -115,6 +119,7 @@ func (e *Engine) Status() (Status, error) {
 	}
 	return Status{
 		Host: e.Host, LastScan: st.LastScan, Listen: listen, OpenFindings: len(st.Open),
+		System: systemView(cfg, st), ConfigChanged: configHash(cfg) != st.ConfigSHA256,
 		Armed: Armed{Auth: cfg.AuthLog != "", Integrity: len(cfg.Watch) > 0, Listen: len(cfg.ListenAllow) > 0},
 		Caps:  caps.Probe(e.capEnv(cfg)),
 	}, nil
@@ -420,6 +425,8 @@ func (e *Engine) Scan(actor, lease string) ([]ids.Finding, error) {
 		listen, extra = ids.Detect(cfg.ListenAllow, tcp, tcp6, over, err)
 		found = append(found, extra...)
 	}
+	system, extra := modules.Scan(e.SystemFS, cfg.Modules)
+	found = append(found, extra...)
 	sort.Slice(found, func(i, j int) bool {
 		if found[i].Subject != found[j].Subject {
 			return found[i].Subject < found[j].Subject
@@ -427,6 +434,10 @@ func (e *Engine) Scan(actor, lease string) ([]ids.Finding, error) {
 		return found[i].Kind < found[j].Kind
 	})
 
+	for id, rec := range st.Open {
+		rec.Observed = false
+		st.Open[id] = rec
+	}
 	seen := map[string]struct{}{}
 	for _, f := range found {
 		id := ident(f)
@@ -436,7 +447,7 @@ func (e *Engine) Scan(actor, lease string) ([]ids.Finding, error) {
 			if err := e.auditFinding(actor, lease, "ids.finding", f, now); err != nil {
 				return nil, err
 			}
-			rec := store.OpenRec{Kind: f.Kind, Severity: f.Severity, Subject: f.Subject, Summary: f.Summary}
+			rec := store.OpenRec{Kind: f.Kind, Severity: f.Severity, Subject: f.Subject, Summary: f.Summary, FirstSeen: now.UTC().Format(time.RFC3339Nano), LastSeen: now.UTC().Format(time.RFC3339Nano), Observed: true}
 			if f.Severity != ids.SevHigh {
 				rec.Paged = true
 			} else {
@@ -449,6 +460,11 @@ func (e *Engine) Scan(actor, lease string) ([]ids.Finding, error) {
 			st.Open[id] = rec
 			continue
 		}
+		if prev.Severity != ids.SevHigh && f.Severity == ids.SevHigh {
+			prev.Paged = false
+		}
+		prev.Observed = true
+		prev.LastSeen = now.UTC().Format(time.RFC3339Nano)
 		prev.Summary = f.Summary
 		prev.Severity = f.Severity
 		prev.Subject = f.Subject
@@ -473,14 +489,24 @@ func (e *Engine) Scan(actor, lease string) ([]ids.Finding, error) {
 	sort.Strings(gone)
 	for _, id := range gone {
 		rec := st.Open[id]
+		disposition := modules.Disposition(rec.Kind, cfg.Modules, system)
+		if disposition == "retain" {
+			continue
+		}
+		action := "ids.resolved"
+		if disposition == "withdraw" {
+			action = "ids.withdrawn"
+		}
 		f := ids.Finding{Kind: rec.Kind, Subject: rec.Subject}
-		if err := e.auditFinding(actor, lease, "ids.resolved", f, now); err != nil {
+		if err := e.auditFinding(actor, lease, action, f, now); err != nil {
 			return nil, err
 		}
 		delete(st.Open, id)
 	}
 	st.LastScan = now.UTC().Format(time.RFC3339Nano)
 	st.Listen = listen
+	st.System = system
+	st.ConfigSHA256 = configHash(cfg)
 	if err := e.Store.PutIDS(st); err != nil {
 		return nil, err
 	}
@@ -490,7 +516,7 @@ func (e *Engine) Scan(actor, lease string) ([]ids.Finding, error) {
 func (e *Engine) auditFinding(actor, lease, action string, f ids.Finding, now time.Time) error {
 	var detail json.RawMessage
 	var err error
-	if action == "ids.resolved" {
+	if action == "ids.resolved" || action == "ids.withdrawn" {
 		detail, err = mustDetail(struct {
 			Kind    string `json:"kind"`
 			Subject string `json:"subject"`

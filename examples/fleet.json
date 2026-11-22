@@ -1,0 +1,22 @@
+{
+  "modules": {
+    "debian": {
+      "enabled": true
+    },
+    "redhat": {
+      "enabled": true
+    },
+    "rocky": {
+      "enabled": true
+    },
+    "ubuntu": {
+      "enabled": true
+    },
+    "alpine": {
+      "enabled": true
+    },
+    "arch": {
+      "enabled": true
+    }
+  }
+}

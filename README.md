@@ -1,6 +1,6 @@
 # systemapi-security
 
-Local host security service for one Linux machine. The binary is `secsvc`. It listens on a Unix socket, checks `secsvc/1` Ed25519 grants, keeps an append-only audit chain, and runs a small host IDS. High findings page through ntfy.sh.
+Local host security service for one Linux machine. The binary is `secsvc`. It listens on a Unix socket, checks `secsvc/1` Ed25519 grants, keeps an append-only audit chain, and runs a host IDS plus configurable distro security modules. High findings page through ntfy.sh.
 
 **sah** means Service Automation Hub. This repository is its own module, `github.com/afterdarksys/systemapi-security`.
 
@@ -35,7 +35,24 @@ secsvc audit verify --dir /var/lib/secsvc
 
 The socket is the only listener. Routes, entitlements, and the audit layout are in `docs/architecture.md`. A future sash verb is specified in `docs/sash-verb.md` and is not in the sash builtin table.
 
-## Next
+## Distro security modules
+
+Opt-in modules now cover Debian, Red Hat, Rocky, Ubuntu, Alpine, and Arch, with
+account, permissions, kernel, SSH, mount, and SELinux/AppArmor checks. Each profile
+and check can be enabled or disabled through configuration. Coverage failures are
+reported explicitly; failed checks retain existing findings.
+
+- [Module configuration and behavior](docs/modules.md)
+- [Per-distro and fleet examples](examples/)
+- [systemd and OpenRC service templates](packaging/README.md)
+- [Claude handoff for agent/backend/dashboard integration](docs/CLAUDE-HANDOFF.md)
+
+`secsvc call modules` reads the registry; `secsvc call report` reads the versioned
+local snapshot (both need `--socket` and a read `--grant`). No remote reporting
+is enabled. All six profiles have fixture tests; Debian, Ubuntu, Rocky, and Alpine
+also passed container smoke tests. Full host/service-manager validation remains.
+
+## Verification
 
 `go test -count=1 -race ./...`
 

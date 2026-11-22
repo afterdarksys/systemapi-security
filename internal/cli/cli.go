@@ -284,6 +284,12 @@ func cmdCall(args []string) int {
 
 func callRoute(verb string) (method, path, kind string, err error) {
 	switch verb {
+	case "modules":
+		return http.MethodGet, "/v1/modules", "", nil
+	case "report":
+		return http.MethodGet, "/v1/report", "", nil
+	case "catalog":
+		return http.MethodGet, "/v1/catalog", "", nil
 	case "status":
 		return http.MethodGet, "/v1/status", "", nil
 	case "config":
