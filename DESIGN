@@ -1,0 +1,13 @@
+1. review the ecosystem in: ~/development/{adssh,systemapi.io,*sah*}/
+   1a. ~/development/sash-init/ - a proposed replacement for systemd
+   1b. ~/development/*sah*/ - replacement for ssh/rsync/scp/stunnel
+2. ~/development/adssh/ - administrative ssh daemon
+3. the sash scripting language can be extended as necessary
+
+What is systemapi-security? 
+	a. systemapi-ified security services and configuration management via api with grants, entitlements, etc
+	b. extensive audit capabilities
+	c. lightweight ids and notification
+
+Notifications sent via ntfy.sh
+

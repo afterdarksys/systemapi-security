@@ -1,0 +1,14 @@
+{
+  "name": "secsvc",
+  "exec": ["/usr/local/bin/secsvc", "serve", "--dir", "/var/lib/secsvc", "--pub", "/etc/secsvc/pub.hex", "--host", "localhost", "--socket", "/run/secsvc/sock", "--interval", "30s"],
+  "type": "simple",
+  "ready": "notify",
+  "restart": "on-failure",
+  "timeout": "30s",
+  "boot": true,
+  "sandbox": {
+    "no_new_privs": true,
+    "read_only_paths": ["/etc", "/usr", "/var/log"],
+    "read_write_paths": ["/var/lib/secsvc", "/run/secsvc"]
+  }
+}
