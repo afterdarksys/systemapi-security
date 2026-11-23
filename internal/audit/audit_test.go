@@ -2,8 +2,6 @@ package audit
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -15,22 +13,43 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func TestChainAppendAndVerify(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	n, err := VerifyFile(path)
-	if err != nil || n != 0 {
-		t.Fatalf("missing: %d %v", n, err)
+func wantCode(t *testing.T, err error, code, what string) {
+	t.Helper()
+	if codes.Code(err) != code {
+		t.Fatalf("%s: got %v want %s", what, err, code)
 	}
-	if err := os.WriteFile(path, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := VerifyFile(path); err != nil {
-		t.Fatal(err)
-	}
-	c, err := Open(path)
+}
+
+func openChain(t *testing.T, dir string, opt Options, keep int) *Chain {
+	t.Helper()
+	c, err := Open(dir, opt, keep)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return c
+}
+
+func appendN(t *testing.T, c *Chain, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(int64(i), 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func seg(dir string, n int) string { return segPath(dir, n) }
+
+func headOf(dir string) string { return filepath.Join(dir, HeadName) }
+
+func TestChainAppendAndVerify(t *testing.T) {
+	dir := t.TempDir()
+	if n, err := VerifyDir(dir); err != nil || n != 0 {
+		t.Fatalf("missing: %d %v", n, err)
+	}
+	c := openChain(t, dir, Options{}, 0)
+	if n, err := VerifyDir(dir); err != nil || n != 0 {
+		t.Fatalf("empty: %d %v", n, err)
 	}
 	now := time.Unix(1_700_000_000, 5).UTC()
 	if err := c.Append("ops", "lease-0001", "config.set", []byte(`{"b":1,"a":"<x>"}`), now); err != nil {
@@ -52,7 +71,7 @@ func TestChainAppendAndVerify(t *testing.T) {
 	if string(rows[0].Detail) != `{"a":"<x>","b":1}` {
 		t.Fatalf("detail %s", rows[0].Detail)
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(seg(dir, 1))
 	if err != nil || bytes.Contains(raw, []byte(`\u003c`)) || !bytes.Contains(raw, []byte("<x>")) {
 		t.Fatalf("escape %s", raw)
 	}
@@ -60,32 +79,30 @@ func TestChainAppendAndVerify(t *testing.T) {
 	if err != nil || len(tail) != 1 || tail[0].Seq != 2 {
 		t.Fatalf("tail %+v %v", tail, err)
 	}
-	st, err := os.Stat(path)
-	if err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("mode %v", st.Mode())
+	for _, p := range []string{seg(dir, 1), headOf(dir)} {
+		st, err := os.Stat(p)
+		if err != nil || st.Mode().Perm() != 0o600 {
+			t.Fatalf("mode %s %v", p, st.Mode())
+		}
+	}
+	if st, err := os.Stat(filepath.Join(dir, SegDir)); err != nil || st.Mode().Perm() != 0o700 {
+		t.Fatalf("dir mode %v", err)
+	}
+	if n, err := VerifyDir(dir); err != nil || n != 2 {
+		t.Fatalf("verify %d %v", n, err)
 	}
 }
 
 func TestChainTamper(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	c, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Unix(1_700_000_000, 0).UTC()
-	if err := c.Append("a", "lease-0001", "config.set", nil, now); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Append("a", "lease-0001", "config.set", nil, now); err != nil {
-		t.Fatal(err)
-	}
+	c := openChain(t, dir, Options{}, 0)
+	appendN(t, c, 2)
+	path := seg(dir, 1)
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
-
 	cases := map[string]func() []byte{
 		"hash": func() []byte {
 			return bytes.Replace(raw, []byte(lines[0]), []byte(flipHash(lines[0])), 1)
@@ -111,58 +128,51 @@ func TestChainTamper(t *testing.T) {
 			if err := os.WriteFile(path, fn(), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := VerifyFile(path); codes.Code(err) != codes.AuditBad {
-				t.Fatalf("got %v", err)
-			}
+			_, err := VerifyDir(dir)
+			wantCode(t, err, codes.AuditBad, "verify")
+			_, err = Open(dir, Options{}, 0)
+			wantCode(t, err, codes.AuditBad, "open")
 		})
 	}
 	if err := os.WriteFile(path, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyFile(path); err != nil {
+	if _, err := VerifyDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	// Uppercase hash is audit_bad even when the digest bytes match.
-	bad := []byte(upperHash(string(raw)))
-	if err := os.WriteFile(path, bad, 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(upperHash(string(raw))), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c2, err := Open(path)
-	if err == nil {
-		t.Fatal("opened tampered chain")
-	}
-	if codes.Code(err) != codes.AuditBad {
-		t.Fatal(err)
-	}
-	_ = c2
-	ok, err := Open(filepath.Join(dir, "fresh.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(ok.path, bad, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := ok.ReadAll(); codes.Code(err) != codes.AuditBad {
-		t.Fatal(err)
-	}
-	if err := ok.Append("a", "lease-0001", "config.set", nil, now); codes.Code(err) != codes.AuditBad {
-		t.Fatal(err)
-	}
+	_, err = c.ReadAll()
+	wantCode(t, err, codes.AuditBad, "runtime")
+	err = c.Append("a", "lease-0001", "config.set", nil, time.Unix(9, 0))
+	wantCode(t, err, codes.AuditBad, "append after")
 }
 
-func TestSymlinkChain(t *testing.T) {
+func TestSymlinks(t *testing.T) {
 	dir := t.TempDir()
-	real := filepath.Join(dir, "real")
-	if err := os.WriteFile(real, nil, 0o600); err != nil {
+	real := t.TempDir()
+	if err := os.Symlink(real, filepath.Join(dir, SegDir)); err != nil {
 		t.Fatal(err)
 	}
-	link := filepath.Join(dir, "link")
-	if err := os.Symlink(real, link); err != nil {
+	_, err := Open(dir, Options{}, 0)
+	wantCode(t, err, codes.AuditBad, "segment dir symlink")
+
+	dir2 := t.TempDir()
+	c := openChain(t, dir2, Options{}, 0)
+	appendN(t, c, 1)
+	other := filepath.Join(t.TempDir(), "x.jsonl")
+	if err := os.Rename(seg(dir2, 1), other); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(link); codes.Code(err) != codes.AuditBad {
+	if err := os.Symlink(other, seg(dir2, 1)); err != nil {
 		t.Fatal(err)
 	}
+	_, err = Open(dir2, Options{}, 0)
+	wantCode(t, err, codes.AuditBad, "segment symlink")
+	_, err = VerifyDir(dir2)
+	wantCode(t, err, codes.AuditBad, "verify segment symlink")
 }
 
 func flipHash(line string) string {
@@ -196,274 +206,165 @@ func upperHash(s string) string {
 	return s
 }
 
-func threeRows(t *testing.T, path string) []byte {
-	t.Helper()
-	c, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Unix(1_700_000_000, 0).UTC()
-	for i := 0; i < 3; i++ {
-		if err := c.Append("a", "lease-0001", "config.set", nil, now); err != nil {
-			t.Fatal(err)
-		}
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return raw
-}
-
 func TestAnchorDetectsTruncation(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	raw := threeRows(t, path)
-	if _, err := os.Stat(filepath.Join(dir, "audit.head")); err != nil {
-		t.Fatalf("anchor not written: %v", err)
+	c := openChain(t, dir, Options{}, 0)
+	appendN(t, c, 3)
+	raw, err := os.ReadFile(seg(dir, 1))
+	if err != nil {
+		t.Fatal(err)
 	}
 	lines := strings.SplitAfter(string(raw), "\n")
 	// A valid chain of the same length, signed by nobody: only the anchor tells.
-	forged := filepath.Join(t.TempDir(), "audit.jsonl")
-	c, err := Open(forged)
-	if err != nil {
-		t.Fatal(err)
-	}
+	other := t.TempDir()
+	f := openChain(t, other, Options{}, 0)
 	for i := 0; i < 3; i++ {
-		if err := c.Append("someone-else", "lease-0002", "config.set", nil, time.Unix(1, 0)); err != nil {
+		if err := f.Append("someone-else", "lease-0002", "config.set", nil, time.Unix(1, 0)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	forgedRaw, err := os.ReadFile(forged)
+	forgedRaw, err := os.ReadFile(seg(other, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	cases := map[string]func() error{
-		"drop_last": func() error { return os.WriteFile(path, []byte(lines[0]+lines[1]), 0o600) },
-		"empty":     func() error { return os.WriteFile(path, nil, 0o600) },
-		"deleted":   func() error { return os.Remove(path) },
-		"rewritten": func() error { return os.WriteFile(path, forgedRaw, 0o600) },
+		"drop_last": func() error { return os.WriteFile(seg(dir, 1), []byte(lines[0]+lines[1]), 0o600) },
+		"empty":     func() error { return os.WriteFile(seg(dir, 1), nil, 0o600) },
+		"deleted":   func() error { return os.Remove(seg(dir, 1)) },
+		"rewritten": func() error { return os.WriteFile(seg(dir, 1), forgedRaw, 0o600) },
+		"dir_gone":  func() error { return os.RemoveAll(filepath.Join(dir, SegDir)) },
 	}
 	for name, fn := range cases {
 		t.Run(name, func(t *testing.T) {
+			if err := os.MkdirAll(filepath.Join(dir, SegDir), 0o700); err != nil {
+				t.Fatal(err)
+			}
 			if err := fn(); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := VerifyFile(path); codes.Code(err) != codes.AuditTruncated {
-				t.Fatalf("verify: %v", err)
-			}
-			if _, err := Open(path); codes.Code(err) != codes.AuditTruncated {
-				t.Fatalf("open: %v", err)
-			}
+			_, err := VerifyDir(dir)
+			wantCode(t, err, codes.AuditTruncated, "verify")
+			_, err = Open(dir, Options{}, 0)
+			wantCode(t, err, codes.AuditTruncated, "open")
 		})
 	}
-	if err := os.WriteFile(path, raw, 0o600); err != nil {
+	if err := os.WriteFile(seg(dir, 1), raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	c2, err := Open(path)
-	if err != nil {
+	c2 := openChain(t, dir, Options{}, 0)
+	if err := os.WriteFile(seg(dir, 1), []byte(lines[0]), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(lines[0]), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c2.ReadAll(); codes.Code(err) != codes.AuditTruncated {
-		t.Fatalf("readall: %v", err)
-	}
-	if err := c2.Append("a", "lease-0001", "config.set", nil, time.Unix(1, 0)); codes.Code(err) != codes.AuditBad {
-		t.Fatalf("append after truncation: %v", err)
-	}
+	_, err = c2.ReadAll()
+	wantCode(t, err, codes.AuditTruncated, "readall")
+	err = c2.Append("a", "lease-0001", "config.set", nil, time.Unix(1, 0))
+	wantCode(t, err, codes.AuditBad, "append after truncation")
 }
 
 func TestAnchorFreshAndCrash(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	head := filepath.Join(dir, "audit.head")
-	c, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	head := headOf(dir)
+	c := openChain(t, dir, Options{}, 0)
 	if _, err := os.Lstat(head); !os.IsNotExist(err) {
 		t.Fatalf("fresh store wrote an anchor: %v", err)
 	}
-	if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(1, 0)); err != nil {
-		t.Fatal(err)
-	}
-	st, err := os.Stat(head)
-	if err != nil || st.Mode().Perm() != 0o600 {
-		t.Fatalf("anchor %v %v", st, err)
-	}
-
-	// A crash between the row and the anchor leaves the anchor one behind.
+	appendN(t, c, 1)
 	old, err := os.ReadFile(head)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(2, 0)); err != nil {
-		t.Fatal(err)
-	}
+	// A crash between the row and the anchor leaves the anchor one behind.
+	appendN(t, c, 1)
 	if err := os.WriteFile(head, old, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := VerifyFile(path); err != nil || n != 2 {
+	if n, err := VerifyDir(dir); err != nil || n != 2 {
 		t.Fatalf("behind %d %v", n, err)
 	}
-	c, err = Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	now, err := os.ReadFile(head)
-	if err != nil || !bytes.Contains(now, []byte(`"seq":2`)) {
+	c = openChain(t, dir, Options{}, 0)
+	if now, err := os.ReadFile(head); err != nil || !bytes.Contains(now, []byte(`"seq":2`)) {
 		t.Fatalf("anchor not moved up: %s %v", now, err)
 	}
 	// Two or more rows past the anchor is not a crash state.
-	if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(3, 0)); err != nil {
-		t.Fatal(err)
-	}
+	appendN(t, c, 1)
 	if err := os.WriteFile(head, old, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyFile(path); codes.Code(err) != codes.AuditTruncated {
-		t.Fatalf("gap 2 verify: %v", err)
-	}
-	if _, err := Open(path); codes.Code(err) != codes.AuditTruncated {
-		t.Fatalf("gap 2 open: %v", err)
-	}
+	_, err = VerifyDir(dir)
+	wantCode(t, err, codes.AuditTruncated, "gap 2 verify")
+	_, err = Open(dir, Options{}, 0)
+	wantCode(t, err, codes.AuditTruncated, "gap 2 open")
 }
 
 // A chain with no anchor is truncated, not upgraded, at open and at runtime.
 func TestMissingAnchorIsTruncated(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	head := filepath.Join(dir, "audit.head")
-	c, err := Open(path)
+	c := openChain(t, dir, Options{}, 0)
+	appendN(t, c, 5)
+	raw, err := os.ReadFile(seg(dir, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 5; i++ {
-		if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(int64(i), 0)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
+	if err := os.Remove(headOf(dir)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(head); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := VerifyFile(path); codes.Code(err) != codes.AuditTruncated {
-		t.Fatalf("verify: %v", err)
-	}
-	if _, err := Open(path); codes.Code(err) != codes.AuditTruncated {
-		t.Fatalf("open: %v", err)
-	}
+	_, err = VerifyDir(dir)
+	wantCode(t, err, codes.AuditTruncated, "verify")
+	_, err = Open(dir, Options{}, 0)
+	wantCode(t, err, codes.AuditTruncated, "open")
 	lines := strings.SplitAfter(string(raw), "\n")
-	if err := os.WriteFile(path, []byte(lines[0]+lines[1]), 0o600); err != nil {
+	if err := os.WriteFile(seg(dir, 1), []byte(lines[0]+lines[1]), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if rows, err := c.ReadAll(); codes.Code(err) != codes.AuditTruncated {
-		t.Fatalf("runtime: %d rows %v", len(rows), err)
-	}
-	if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(9, 0)); codes.Code(err) != codes.AuditBad {
-		t.Fatalf("append after truncation: %v", err)
-	}
+	_, err = c.ReadAll()
+	wantCode(t, err, codes.AuditTruncated, "runtime")
+	err = c.Append("a", "lease-0001", "config.set", nil, time.Unix(9, 0))
+	wantCode(t, err, codes.AuditBad, "append after truncation")
 
-	// Both files gone under a running chain is truncated too.
+	// Everything gone under a running chain is truncated too.
 	dir2 := t.TempDir()
-	path2 := filepath.Join(dir2, "audit.jsonl")
-	c2, err := Open(path2)
-	if err != nil {
+	c2 := openChain(t, dir2, Options{}, 0)
+	appendN(t, c2, 1)
+	if err := os.RemoveAll(filepath.Join(dir2, SegDir)); err != nil {
 		t.Fatal(err)
 	}
-	if err := c2.Append("a", "lease-0001", "config.set", nil, time.Unix(1, 0)); err != nil {
+	if err := os.Remove(headOf(dir2)); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(path2); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Remove(filepath.Join(dir2, "audit.head")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c2.ReadAll(); codes.Code(err) != codes.AuditTruncated {
-		t.Fatalf("both gone: %v", err)
-	}
-}
-
-func TestAnchorCommand(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	head := filepath.Join(dir, "audit.head")
-	if n, err := Anchor(path, time.Unix(1, 0)); err != nil || n != 0 {
-		t.Fatalf("empty %d %v", n, err)
-	}
-	if _, err := os.Lstat(head); !os.IsNotExist(err) {
-		t.Fatal("empty chain anchored")
-	}
-	raw := threeRows(t, path)
-	if err := os.Remove(head); err != nil {
-		t.Fatal(err)
-	}
-	n, err := Anchor(path, time.Unix(5, 0))
-	if err != nil || n != 4 {
-		t.Fatalf("anchor %d %v", n, err)
-	}
-	c, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows, err := c.ReadAll()
-	if err != nil || len(rows) != 4 || rows[3].Action != "audit.anchor_init" {
-		t.Fatalf("%+v %v", rows, err)
-	}
-	want := `{"hash":"` + rows[2].Hash + `","seq":3}`
-	if string(rows[3].Detail) != want {
-		t.Fatalf("detail %s want %s", rows[3].Detail, want)
-	}
-	if _, err := Anchor(path, time.Unix(6, 0)); codes.Code(err) != codes.AnchorExists {
-		t.Fatalf("second anchor: %v", err)
-	}
-	// A broken chain is not anchored.
-	if err := os.Remove(head); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte(flipHash(strings.SplitAfter(string(raw), "\n")[0])), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Anchor(path, time.Unix(7, 0)); codes.Code(err) != codes.AuditBad {
-		t.Fatalf("broken: %v", err)
-	}
-	if _, err := os.Lstat(head); !os.IsNotExist(err) {
-		t.Fatal("broken chain anchored")
-	}
+	_, err = c2.ReadAll()
+	wantCode(t, err, codes.AuditTruncated, "all gone")
 }
 
 func TestStateOpenDoesNotBlockOnFIFO(t *testing.T) {
-	fifo := filepath.Join(t.TempDir(), "audit.jsonl")
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "fifo")
 	if err := unix.Mkfifo(fifo, 0o600); err != nil {
 		t.Skip("mkfifo:", err)
 	}
-	done := make(chan error, 1)
+	done := make(chan error, 2)
 	go func() {
-		_, err := readAll(fifo)
+		_, err := readCapped(fifo, 1<<10)
 		done <- err
 	}()
-	select {
-	case err := <-done:
-		if codes.Code(err) != codes.AuditBad {
-			t.Fatal(err)
+	go func() {
+		_, _, _, err := walk(fifo, 1, Genesis, func(Row, []byte) error { return nil })
+		done <- err
+	}()
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-done:
+			wantCode(t, err, codes.AuditBad, "fifo")
+		case <-time.After(3 * time.Second):
+			t.Fatal("blocked on a FIFO")
 		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("blocked on a FIFO")
 	}
 }
 
 func TestAnchorBadShape(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	threeRows(t, path)
-	head := filepath.Join(dir, "audit.head")
+	c := openChain(t, dir, Options{}, 0)
+	appendN(t, c, 3)
+	head := headOf(dir)
 	good, err := os.ReadFile(head)
 	if err != nil {
 		t.Fatal(err)
@@ -478,9 +379,8 @@ func TestAnchorBadShape(t *testing.T) {
 			if err := os.WriteFile(head, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := VerifyFile(path); codes.Code(err) != codes.AuditBad {
-				t.Fatalf("got %v", err)
-			}
+			_, err := VerifyDir(dir)
+			wantCode(t, err, codes.AuditBad, "verify")
 		})
 	}
 	if err := os.Remove(head); err != nil {
@@ -493,26 +393,18 @@ func TestAnchorBadShape(t *testing.T) {
 	if err := os.Symlink(real, head); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyFile(path); codes.Code(err) != codes.AuditBad {
-		t.Fatalf("symlink anchor: %v", err)
-	}
+	_, err = VerifyDir(dir)
+	wantCode(t, err, codes.AuditBad, "symlink anchor")
 }
 
 // forgeRow appends a row with a correctly recomputed hash, as a forger would.
 func forgeRow(t *testing.T, path string, seq int64, prev string) string {
 	t.Helper()
-	b := body{Seq: seq, Prev: prev, Time: "2026-01-01T00:00:00Z", Actor: "evil", Action: "config.set", Detail: json.RawMessage(`{}`)}
-	raw, err := codes.Marshal(b)
+	line, hash, err := encode(body{Seq: seq, Prev: prev, Time: "2026-01-01T00:00:00Z", Actor: "evil", Action: "config.set", Detail: json.RawMessage(`{}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256(raw)
-	hash := hex.EncodeToString(sum[:])
-	line, err := codes.Marshal(stored{body: b, Hash: hash})
-	if err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,75 +416,53 @@ func forgeRow(t *testing.T, path string, seq int64, prev string) string {
 }
 
 // Inside a running chain the daemon is the only writer: a forged row past
-// what it wrote is not adopted, even within load's one-row crash allowance.
+// what it wrote is not adopted, even within the one-row crash allowance.
 func TestReadAllRefusesForeignTail(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
-	c, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 3; i++ {
-		if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(int64(i), 0)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	forgeRow(t, path, 4, c.prev)
-	if rows, err := c.ReadAll(); codes.Code(err) != codes.AuditTruncated {
-		t.Fatalf("adopted forged tail: %d rows %v", len(rows), err)
-	}
+	dir := t.TempDir()
+	c := openChain(t, dir, Options{}, 0)
+	appendN(t, c, 3)
+	forgeRow(t, seg(dir, 1), 4, c.prev)
+	rows, err := c.ReadAll()
+	wantCode(t, err, codes.AuditTruncated, "adopted forged tail")
+	_ = rows
 }
 
 // A tail row rewritten in place (same seq, new hash, anchor rewritten to
 // match) is caught by the hash half of the runtime check.
 func TestReadAllRefusesRewrittenTail(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	c, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 3; i++ {
-		if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(int64(i), 0)); err != nil {
-			t.Fatal(err)
-		}
-	}
+	c := openChain(t, dir, Options{}, 0)
+	appendN(t, c, 3)
 	rows, err := c.ReadAll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(seg(dir, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.SplitAfter(string(raw), "\n")
-	if err := os.WriteFile(path, []byte(lines[0]+lines[1]), 0o600); err != nil {
+	if err := os.WriteFile(seg(dir, 1), []byte(lines[0]+lines[1]), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	hash := forgeRow(t, path, 3, rows[1].Hash)
-	if err := writeHead(HeadPath(path), anchor{Seq: 3, Hash: hash}); err != nil {
+	hash := forgeRow(t, seg(dir, 1), 3, rows[1].Hash)
+	if err := writeAtomic(headOf(dir), anchor{Seq: 3, Hash: hash}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := VerifyFile(path); err != nil {
+	if _, err := VerifyDir(dir); err != nil {
 		t.Fatalf("forgery should verify on disk: %v", err)
 	}
-	if _, err := c.ReadAll(); codes.Code(err) != codes.AuditTruncated {
-		t.Fatalf("rewritten tail: %v", err)
-	}
+	_, err = c.ReadAll()
+	wantCode(t, err, codes.AuditTruncated, "rewritten tail")
 }
 
 // The daemon writes the first row before the anchor; verify retries over
 // that window, and still reports a lag that does not resolve.
 func TestVerifyRetriesAnchorLag(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	c, err := Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(1, 0)); err != nil {
-		t.Fatal(err)
-	}
-	head := HeadPath(path)
+	c := openChain(t, dir, Options{}, 0)
+	appendN(t, c, 1)
+	head := headOf(dir)
 	good, err := os.ReadFile(head)
 	if err != nil {
 		t.Fatal(err)
@@ -608,7 +478,7 @@ func TestVerifyRetriesAnchorLag(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	if n, err := VerifyFile(path); err != nil || n != 1 || calls != 1 {
+	if n, err := VerifyDir(dir); err != nil || n != 1 || calls != 1 {
 		t.Fatalf("lag that resolves: %d %v calls=%d", n, err, calls)
 	}
 	if err := os.Remove(head); err != nil {
@@ -616,7 +486,7 @@ func TestVerifyRetriesAnchorLag(t *testing.T) {
 	}
 	calls = 0
 	verifyRetry = func(int) { calls++ }
-	if _, err := VerifyFile(path); codes.Code(err) != codes.AuditTruncated || calls != 2 {
+	if _, err := VerifyDir(dir); codes.Code(err) != codes.AuditTruncated || calls != 2 {
 		t.Fatalf("lag that persists: %v calls=%d", err, calls)
 	}
 }

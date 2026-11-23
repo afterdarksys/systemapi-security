@@ -43,6 +43,9 @@ const (
 	HostUnset      = "host_unset"
 	AnchorExists   = "anchor_exists"
 	StoreBusy      = "store_busy"
+	AuditLayout    = "audit_layout"
+	RateLimited    = "rate_limited"
+	QueueFull      = "queue_full"
 )
 
 // Error is a stable code. Error() returns only that code.
