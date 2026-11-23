@@ -96,6 +96,10 @@ var (
 	hookMu    sync.Mutex
 	orderHook func(step string)
 
+	// engineHook lets a test swap the sender and probes of the engine Serve
+	// builds. It is nil in the daemon.
+	engineHook func(*engine.Engine)
+
 	// writeTimeout bounds every response. A scan answers after its commit
 	// and pages afterwards, so a slow ntfy never holds a response past it.
 	writeTimeout = 10 * time.Second
@@ -602,6 +606,9 @@ func Serve(ctx context.Context, opt Options) error {
 	eng := &engine.Engine{
 		Store: st, Host: opt.Host, Now: opt.Now, Pub: pub,
 		Sender: &notify.Sender{Log: logCode}, Log: logCode,
+	}
+	if engineHook != nil {
+		engineHook(eng)
 	}
 	srv := newHTTPServer(&Server{Host: opt.Host, Pub: pub, Eng: eng, Now: opt.Now})
 	if err := eng.Resume(); err != nil {
