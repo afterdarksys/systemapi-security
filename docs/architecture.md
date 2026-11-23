@@ -103,7 +103,7 @@ Three detectors, off until configured.
 
 Auth tail reads `auth_log` from a stored offset. Matching is a fixed substring list. The raw line is not a finding. Five failures in 300 seconds is the default, and the finding is `auth_fail` at severity `high`. An unreadable log suppresses `auth_fail` for that scan and records `auth_log_unavailable` at `medium`.
 
-Integrity `Lstat`s each watch path and does not follow a symlink. A symlink, a missing baselined path, a changed hash, or an unreadable baselined file is `high`. An unbaselined path is `medium`. `POST /v1/baseline` measures the current watch list.
+Integrity `Lstat`s each watch path and does not follow a symlink. A symlink, a missing baselined path, a changed hash, or an unreadable baselined file is `high`. An unbaselined path is `medium`. `POST /v1/baseline` measures the current watch list. Every open of a configured path, by a scan or by the status probe, is `O_NONBLOCK|O_NOFOLLOW` and checks with fstat that the file is regular before any read; a FIFO, socket, or device is `integrity_not_file` (or `auth_log_unavailable`, or a capability `unreadable`) with internal code `not_regular`, never a blocking read. Reads are capped (1 MiB per auth scan, 4 MiB per hashed file).
 
 Listeners decode `/proc/net/tcp` and `/proc/net/tcp6` only when `listen_allow` is non-empty. An address outside that list is `listen_unexpected` at `high`. A truncated table is `listen_truncated` at `medium`. A decode failure is `unsupported`, so a partial table is not treated as clean.
 

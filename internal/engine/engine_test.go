@@ -20,6 +20,7 @@ import (
 	"github.com/afterdarksys/systemapi-security/internal/ids"
 	"github.com/afterdarksys/systemapi-security/internal/notify"
 	"github.com/afterdarksys/systemapi-security/internal/store"
+	"golang.org/x/sys/unix"
 )
 
 const topic = "topic-topic-topic-topic"
@@ -733,5 +734,37 @@ func TestAuditCapTruncated(t *testing.T) {
 	}
 	if c := capBy(st, "audit"); c.State != caps.StateDegraded || c.Reason != caps.ReasonAuditBad {
 		t.Fatalf("audit %+v", c)
+	}
+}
+
+func TestFIFOStatusAndScanDoNotBlock(t *testing.T) {
+	e, dir := newEng(t)
+	logp := filepath.Join(dir, "auth.fifo")
+	watch := filepath.Join(dir, "watch.fifo")
+	putJSON(t, e, "lease-fifo1", map[string]any{"auth_log": logp, "watch": []string{watch}}, coverAll)
+	if err := unix.Mkfifo(logp, 0o600); err != nil {
+		t.Skip("mkfifo:", err)
+	}
+	if err := unix.Mkfifo(watch, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan Status, 1)
+	go func() {
+		st, _ := e.Status()
+		if _, err := e.Scan("secsvc", ""); err != nil {
+			t.Error(err)
+		}
+		done <- st
+	}()
+	select {
+	case st := <-done:
+		if c := capBy(st, "auth"); c.State != caps.StateDegraded || c.Reason != caps.ReasonUnreadable {
+			t.Fatalf("auth %+v", c)
+		}
+		if c := capBy(st, "integrity"); c.State != caps.StateDegraded || c.Reason != caps.ReasonUnreadable {
+			t.Fatalf("integrity %+v", c)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("status or scan blocked on a FIFO")
 	}
 }

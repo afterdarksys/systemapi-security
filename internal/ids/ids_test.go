@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/afterdarksys/systemapi-security/internal/codes"
+	"golang.org/x/sys/unix"
 )
 
 func TestScanAuth(t *testing.T) {
@@ -300,4 +301,43 @@ func TestListen(t *testing.T) {
 	if got[0].Subject != "10.0.0.1:1" || got[15].Subject != "10.0.0.1:5" {
 		t.Fatalf("%s %s", got[0].Subject, got[15].Subject)
 	}
+}
+
+// withDeadline fails the test instead of hanging when fn blocks.
+func withDeadline(t *testing.T, fn func()) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("blocked on a special file")
+	}
+}
+
+func TestFIFODoesNotBlock(t *testing.T) {
+	dir := t.TempDir()
+	fifo := filepath.Join(dir, "fifo")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Skip("mkfifo:", err)
+	}
+	// The opens are what must not block: call them past the Lstat guard.
+	withDeadline(t, func() {
+		if _, err := hashOpen(fifo); codes.Code(err) != codes.NotRegular {
+			t.Errorf("hashOpen: %v", err)
+		}
+		if _, err := openRegular(fifo); codes.Code(err) != codes.NotRegular {
+			t.Errorf("openRegular: %v", err)
+		}
+		if f := Check(fifo, &Record{SHA256: strings.Repeat("a", 64)}); f.Kind != KindNotReg || f.Severity != SevHigh {
+			t.Errorf("check: %+v", f)
+		}
+		_, _, f := ScanAuth(fifo, 0, nil, 5, 300, time.Unix(1_700_000_000, 0))
+		if f == nil || f.Kind != KindAuthNA {
+			t.Errorf("auth: %+v", f)
+		}
+	})
 }

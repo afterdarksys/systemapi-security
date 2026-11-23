@@ -219,8 +219,10 @@ func watchCheck(paths []string) caps.Check {
 }
 
 // classFile opens the path without following a symlink and does not read it.
+// Threats: a FIFO or device at a configured path must not block status while
+// it holds e.mu, so the open is O_NONBLOCK and fstat decides regularity.
 func classFile(path string) error {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if err == unix.ENOENT {
 			return caps.ErrMissing

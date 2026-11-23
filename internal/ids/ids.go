@@ -5,7 +5,10 @@
 // An unreadable auth log suppresses auth_fail for that scan. Listener decode
 // failure is unsupported, so a partial /proc view is not treated as clean.
 // An empty allowlist does not read /proc. This is not a packet IDS. A symlink
-// in a parent directory is out of scope.
+// in a parent directory is out of scope. Every open of a configured path is
+// O_NONBLOCK|O_NOFOLLOW and fstat must say regular before a read, so a FIFO or
+// device swapped in after Lstat is not_regular rather than a hung scan. Reads
+// are capped.
 package ids
 
 import (
@@ -155,11 +158,10 @@ func readWindow(path string, offset int64) ([]string, int64, error) {
 	if offset < 0 || offset > fi.Size() {
 		offset = 0
 	}
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	f, err := openRegular(path)
 	if err != nil {
 		return nil, offset, err
 	}
-	f := os.NewFile(uintptr(fd), path)
 	defer f.Close()
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
 		return nil, offset, err
@@ -221,6 +223,13 @@ func Check(path string, base *Record) Finding {
 		if err == errBig {
 			return oversize(path, baselined)
 		}
+		if codes.Code(err) == codes.NotRegular {
+			sev := SevMedium
+			if baselined {
+				sev = SevHigh
+			}
+			return Finding{Kind: KindNotReg, Severity: sev, Subject: path, Summary: "not a file"}
+		}
 		return unread(path, baselined)
 	}
 	if !baselined {
@@ -263,23 +272,45 @@ func Measure(path string) (Record, error) {
 	return rec, nil
 }
 
+// openRegular opens path O_NONBLOCK|O_NOFOLLOW and refuses anything fstat
+// does not call a regular file, so a FIFO never blocks the open or the read.
+func openRegular(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		unix.Close(fd)
+		return nil, codes.E(codes.NotRegular)
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}
+
 func hashOpen(path string) (Record, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	f, err := openRegular(path)
 	if err != nil {
 		return Record{}, err
 	}
-	f := os.NewFile(uintptr(fd), path)
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil {
 		return Record{}, err
 	}
-	if st.Size() > FileMax || !st.Mode().IsRegular() {
+	if st.Size() > FileMax {
 		return Record{}, errBig
 	}
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	n, err := io.Copy(h, io.LimitReader(f, FileMax+1))
+	if err != nil {
 		return Record{}, err
+	}
+	if n > FileMax {
+		return Record{}, errBig
 	}
 	sum := h.Sum(nil)
 	return Record{SHA256: hex.EncodeToString(sum), Mode: uint32(st.Mode().Perm()), Size: st.Size()}, nil
