@@ -38,6 +38,7 @@ const (
 	ReadyFailed    = "ready_failed"
 	AuditTruncated = "audit_truncated"
 	NotRegular     = "not_regular"
+	ConfigScope    = "config_scope"
 )
 
 // Error is a stable code. Error() returns only that code.

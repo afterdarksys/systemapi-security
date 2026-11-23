@@ -248,7 +248,7 @@ func TestCallAgainstServe(t *testing.T) {
 	}
 	out.Reset()
 	errb.Reset()
-	if c := Main([]string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "localhost", "--purpose", "security:operate", "--ttl", "10m", "--lease", "lease-call2"}); c != 0 {
+	if c := Main([]string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "localhost", "--purpose", "security:operate", "--ttl", "10m", "--lease", "lease-call2", "--watch", "/proc/net"}); c != 0 {
 		t.Fatal(c, errb.String())
 	}
 	grant2 := filepath.Join(dir, "grant2")
@@ -312,7 +312,7 @@ func TestCallAgainstServe(t *testing.T) {
 		t.Fatalf("%d %q %q", c, errb.String(), out.String())
 	}
 	cfg := filepath.Join(dir, "cfg.json")
-	if err := os.WriteFile(cfg, []byte(`{"auth_fail_limit":9}`), 0o600); err != nil {
+	if err := os.WriteFile(cfg, []byte(`{"listen_allow":["127.0.0.1:22"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	out.Reset()
@@ -322,7 +322,7 @@ func TestCallAgainstServe(t *testing.T) {
 	}
 	out.Reset()
 	errb.Reset()
-	if c := Main([]string{"call", "config", "--socket", sock, "--grant", grantPath}); c != 0 || !bytes.Contains(out.Bytes(), []byte(`"auth_fail_limit":9`)) {
+	if c := Main([]string{"call", "config", "--socket", sock, "--grant", grantPath}); c != 0 || !bytes.Contains(out.Bytes(), []byte(`"listen_allow":["127.0.0.1:22"]`)) {
 		t.Fatalf("%d %q %q", c, errb.String(), out.String())
 	}
 	out.Reset()

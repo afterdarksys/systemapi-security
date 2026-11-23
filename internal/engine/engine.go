@@ -278,8 +278,8 @@ func (e *Engine) PutConfig(actor, lease string, exp int64, body []byte, covers f
 		return err
 	}
 	old := e.Store.Config()
-	if !store.AllowChange(old, neu, covers) {
-		return codes.E(codes.Forbidden)
+	if err := store.AllowChange(old, neu, covers); err != nil {
+		return err
 	}
 	if err := store.ProbePaths(neu); err != nil {
 		return err

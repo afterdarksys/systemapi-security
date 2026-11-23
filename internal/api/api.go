@@ -455,7 +455,7 @@ func statusOf(code string) int {
 	case codes.GrantBadShape, codes.GrantPurpose, codes.GrantTTL, codes.GrantStar, codes.GrantRootSlash,
 		codes.BadContact, codes.BadPath, codes.Oversized, codes.BlockedAddress:
 		return http.StatusBadRequest
-	case codes.GrantHost, codes.GrantSpent, codes.Forbidden:
+	case codes.GrantHost, codes.GrantSpent, codes.Forbidden, codes.ConfigScope:
 		return http.StatusForbidden
 	case codes.Method:
 		return http.StatusMethodNotAllowed

@@ -31,7 +31,9 @@ Domain string `secsvc-grant-v1\n`. Signature is Ed25519 and is checked before ex
 
 `*` is `grant_star`. A watch of `/` is `grant_root_slash`. The daemon refuses a grant whose host differs from `--host` with `grant_host`. A second use of the same lease id is `grant_spent`. Spend is recorded before the commit and stays recorded when the commit fails. A blocked ntfy egress check returns before the lease is spent.
 
-A grant's `watch` list covers an `auth_log` or `watch` path that a config replace adds or removes. An unchanged path may sit outside the grant. `listen_allow` entries are addresses, not paths.
+A grant's `watch` list covers an `auth_log` or `watch` path that a config replace adds or removes. An unchanged path may sit outside the grant; an uncovered changed path is `forbidden`. `listen_allow` entries are addresses, not paths.
+
+Global fields need coverage of what they govern, so a grant scoped to one path cannot change them. A `listen_allow` change (as a set) needs a grant that covers `/proc/net/tcp` and `/proc/net/tcp6`, for example `--watch /proc/net`. An `auth_fail_limit` or `auth_window_s` change needs coverage of every `auth_log` set before or after the replace, and is refused when neither is set. Otherwise the replace is `config_scope` (403) and spends nothing.
 
 ## HTTP
 

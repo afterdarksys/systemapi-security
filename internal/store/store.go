@@ -504,21 +504,31 @@ func Normalize(c Config) (Config, error) {
 	return c, nil
 }
 
-// AllowChange reports whether covers authorizes every path that changed.
-// An unchanged path may stay outside the grant roots.
-func AllowChange(old, neu Config, covers func(string) bool) bool {
+// Listener tables the listen detector reads. A listen_allow change governs
+// them, so it needs a grant that covers both.
+var listenInputs = []string{"/proc/net/tcp", "/proc/net/tcp6"}
+
+// AllowChange returns nil when covers authorizes every changed field. An
+// unchanged path may stay outside the grant roots. A changed watch, auth_log,
+// or module path is forbidden when uncovered.
+//
+// Threats: a grant scoped to one path must not change a global field. Each
+// global field needs coverage of what it governs: listen_allow needs both
+// listener tables; auth_fail_limit and auth_window_s need every auth_log set
+// before or after, and at least one must be set. Otherwise config_scope.
+func AllowChange(old, neu Config, covers func(string) bool) error {
 	if covers == nil {
 		covers = func(string) bool { return false }
 	}
 	if !modules.ChangeAllowed(old.Modules, neu.Modules, covers) {
-		return false
+		return codes.E(codes.Forbidden)
 	}
 	if old.AuthLog != neu.AuthLog {
 		if old.AuthLog != "" && !covers(old.AuthLog) {
-			return false
+			return codes.E(codes.Forbidden)
 		}
 		if neu.AuthLog != "" && !covers(neu.AuthLog) {
-			return false
+			return codes.E(codes.Forbidden)
 		}
 	}
 	prev := map[string]struct{}{}
@@ -531,11 +541,44 @@ func AllowChange(old, neu Config, covers func(string) bool) bool {
 	}
 	for p := range prev {
 		if _, ok := next[p]; !ok && !covers(p) {
-			return false
+			return codes.E(codes.Forbidden)
 		}
 	}
 	for p := range next {
 		if _, ok := prev[p]; !ok && !covers(p) {
+			return codes.E(codes.Forbidden)
+		}
+	}
+	if !sameSet(old.ListenAllow, neu.ListenAllow) {
+		for _, p := range listenInputs {
+			if !covers(p) {
+				return codes.E(codes.ConfigScope)
+			}
+		}
+	}
+	if old.AuthFailLimit != neu.AuthFailLimit || old.AuthWindowS != neu.AuthWindowS {
+		if old.AuthLog == "" && neu.AuthLog == "" {
+			return codes.E(codes.ConfigScope)
+		}
+		for _, p := range []string{old.AuthLog, neu.AuthLog} {
+			if p != "" && !covers(p) {
+				return codes.E(codes.ConfigScope)
+			}
+		}
+	}
+	return nil
+}
+
+func sameSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	m := make(map[string]struct{}, len(a))
+	for _, s := range a {
+		m[s] = struct{}{}
+	}
+	for _, s := range b {
+		if _, ok := m[s]; !ok {
 			return false
 		}
 	}

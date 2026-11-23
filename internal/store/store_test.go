@@ -63,35 +63,69 @@ func TestAllowChange(t *testing.T) {
 	covers := func(p string) bool {
 		return p == "/var/log/a" || p == "/var/log/b" || p == "/var/lib/drop" || p == "/var/lib/add"
 	}
+	want := func(t *testing.T, err error, code string) {
+		t.Helper()
+		if codes.Code(err) != code {
+			t.Fatalf("got %q want %q", codes.Code(err), code)
+		}
+	}
 	neu := old
 	neu.AuthFailLimit = 9
-	if !AllowChange(old, neu, covers) {
-		t.Fatal("threshold")
-	}
+	want(t, AllowChange(old, neu, covers), "")
 	neu = old
 	neu.AuthLog = "/var/log/b"
-	if !AllowChange(old, neu, covers) {
-		t.Fatal("rewrite covered")
-	}
+	want(t, AllowChange(old, neu, covers), "")
 	neu.AuthLog = "/var/log/nope"
-	if AllowChange(old, neu, covers) {
-		t.Fatal("rewrite uncovered")
-	}
+	want(t, AllowChange(old, neu, covers), codes.Forbidden)
 	neu = old
 	neu.Watch = []string{"/var/lib/keep", "/var/lib/add"}
-	if !AllowChange(old, neu, covers) {
-		t.Fatal("add and drop covered")
-	}
+	want(t, AllowChange(old, neu, covers), "")
 	neu.Watch = []string{"/var/lib/keep"}
-	if AllowChange(old, neu, func(string) bool { return false }) {
-		t.Fatal("drop uncovered")
-	}
+	want(t, AllowChange(old, neu, func(string) bool { return false }), codes.Forbidden)
 	neu.Watch = []string{"/var/lib/keep", "/var/lib/drop", "/etc/outside"}
-	if AllowChange(old, neu, covers) {
-		t.Fatal("add outside")
+	want(t, AllowChange(old, neu, covers), codes.Forbidden)
+	want(t, AllowChange(old, old, func(string) bool { return false }), "")
+}
+
+func TestAllowChangeGlobalScope(t *testing.T) {
+	old := Config{AuthLog: "/var/log/auth.log", Watch: []string{"/etc/passwd"}, AuthFailLimit: 5, AuthWindowS: 300, ListenAllow: []string{"127.0.0.1:22"}}
+	narrow := func(p string) bool { return p == "/etc/passwd" }
+	authOnly := func(p string) bool { return p == "/var/log/auth.log" }
+	procNet := func(p string) bool { return p == "/proc/net/tcp" || p == "/proc/net/tcp6" }
+	cases := []struct {
+		name   string
+		edit   func(c *Config)
+		covers func(string) bool
+		code   string
+	}{
+		{"listen by narrow grant", func(c *Config) { c.ListenAllow = []string{"0.0.0.0:22"} }, narrow, codes.ConfigScope},
+		{"listen cleared by narrow grant", func(c *Config) { c.ListenAllow = nil }, narrow, codes.ConfigScope},
+		{"listen with one table", func(c *Config) { c.ListenAllow = []string{"0.0.0.0:22"} }, func(p string) bool { return p == "/proc/net/tcp" }, codes.ConfigScope},
+		{"listen by proc grant", func(c *Config) { c.ListenAllow = []string{"0.0.0.0:22"} }, procNet, ""},
+		{"listen reorder only", func(c *Config) { c.ListenAllow = []string{"127.0.0.1:22"} }, narrow, ""},
+		{"limit by narrow grant", func(c *Config) { c.AuthFailLimit = 1000 }, narrow, codes.ConfigScope},
+		{"window by narrow grant", func(c *Config) { c.AuthWindowS = 1 }, narrow, codes.ConfigScope},
+		{"limit by auth grant", func(c *Config) { c.AuthFailLimit = 1000 }, authOnly, ""},
+		{"narrow watch add", func(c *Config) { c.Watch = []string{"/etc/passwd", "/etc/passwd-"} }, func(p string) bool { return strings.HasPrefix(p, "/etc/passwd") }, ""},
 	}
-	if !AllowChange(old, old, func(string) bool { return false }) {
-		t.Fatal("unchanged uncovered may stay")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			neu := old
+			neu.Watch = append([]string(nil), old.Watch...)
+			neu.ListenAllow = append([]string(nil), old.ListenAllow...)
+			tc.edit(&neu)
+			if got := codes.Code(AllowChange(old, neu, tc.covers)); got != tc.code {
+				t.Fatalf("got %q want %q", got, tc.code)
+			}
+		})
+	}
+	// With no auth log before or after, a threshold change governs nothing a
+	// grant can cover, so it is refused rather than pre-set by anyone.
+	bare := Config{AuthFailLimit: 5, AuthWindowS: 300}
+	neu := bare
+	neu.AuthFailLimit = 9
+	if got := codes.Code(AllowChange(bare, neu, func(string) bool { return true })); got != codes.ConfigScope {
+		t.Fatalf("bare threshold %q", got)
 	}
 }
 

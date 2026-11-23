@@ -247,6 +247,9 @@ func TestCoverageAndBaselineSpend(t *testing.T) {
 	err := e.PutConfig("actor", "lease-bad", expAt(), body, func(string) bool { return false })
 	wantCode(t, err, codes.Forbidden)
 	body, _ = json.Marshal(map[string]any{"watch": []string{kept}, "auth_fail_limit": 9})
+	err = e.PutConfig("actor", "lease-glob", expAt(), body, func(string) bool { return false })
+	wantCode(t, err, codes.ConfigScope)
+	body, _ = json.Marshal(map[string]any{"watch": []string{kept}, "auth_fail_limit": 5})
 	if err := e.PutConfig("actor", "lease-ok", expAt(), body, func(string) bool { return false }); err != nil {
 		t.Fatal(err)
 	}
@@ -627,7 +630,7 @@ func TestContactEgressDoesNotSpend(t *testing.T) {
 
 func TestCommitFailureStaysSpent(t *testing.T) {
 	e, dir := newEng(t)
-	body, _ := json.Marshal(map[string]any{"auth_fail_limit": 7})
+	body, _ := json.Marshal(map[string]any{"listen_allow": []string{"127.0.0.1:7"}})
 	if err := e.PutConfig("actor", "lease-setup", expAt(), body, coverAll); err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +641,7 @@ func TestCommitFailureStaysSpent(t *testing.T) {
 	if err := os.Mkdir(cfg, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	body, _ = json.Marshal(map[string]any{"auth_fail_limit": 8})
+	body, _ = json.Marshal(map[string]any{"listen_allow": []string{"127.0.0.1:8"}})
 	err := e.PutConfig("actor", "lease-fail", expAt(), body, coverAll)
 	wantCode(t, err, codes.Failed)
 	err = e.PutConfig("actor", "lease-fail", expAt(), body, coverAll)
