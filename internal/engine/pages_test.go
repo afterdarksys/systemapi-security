@@ -11,6 +11,7 @@ import (
 	"github.com/afterdarksys/systemapi-security/internal/codes"
 	"github.com/afterdarksys/systemapi-security/internal/ids"
 	"github.com/afterdarksys/systemapi-security/internal/notify"
+	"github.com/afterdarksys/systemapi-security/internal/store"
 )
 
 const pageHost = "web-07.example.net"
@@ -156,7 +157,66 @@ func TestPageQueueFull(t *testing.T) {
 	}
 }
 
-func TestPagerStopFailsQueued(t *testing.T) {
+// restart opens a second engine on the same state directory, as a new
+// process would after a stop or a crash.
+func restart(t *testing.T, e *Engine, c *capture) *Engine {
+	t.Helper()
+	st, err := store.Open(e.Store.Dir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Engine{Store: st, Host: e.Host, Now: e.Now, Proc: e.Proc, Sender: c.sender(publicIP(), nil, 200)}
+}
+
+func assertPending(t *testing.T, e *Engine, pending bool) {
+	t.Helper()
+	n := 0
+	for _, rec := range e.Store.IDS().Open {
+		if rec.Severity != ids.SevHigh {
+			continue
+		}
+		n++
+		if rec.Pending != pending || rec.Paged == pending {
+			t.Fatalf("pending=%v want %v paged=%v", rec.Pending, pending, rec.Paged)
+		}
+	}
+	if n != 2 {
+		t.Fatalf("high findings %d", n)
+	}
+}
+
+// A crash after the scan commits and before the pager sends: the pages are
+// pending on disk, not paged, and the next start sends them.
+func TestCrashAfterCommitResendsPages(t *testing.T) {
+	c := &capture{}
+	e, _ := changedWatch(t, false, c, 200)
+	if _, err := e.Scan("secsvc", "", 0); err != nil {
+		t.Fatal(err)
+	}
+	assertPending(t, e, true)
+	sent := &capture{}
+	e2 := restart(t, e, sent)
+	if err := e2.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	drainPages(e2)
+	if sent.posts != 2 || c.posts != 0 {
+		t.Fatalf("resent %d first %d", sent.posts, c.posts)
+	}
+	assertPending(t, e2, false)
+	// Sent pages are not sent again.
+	if err := e2.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	drainPages(e2)
+	if sent.posts != 2 {
+		t.Fatalf("posts %d", sent.posts)
+	}
+}
+
+// Shutdown during a scan: the pager is stopped after the scan returns and
+// leaves what is queued pending, not failed; the next start sends it.
+func TestShutdownMidScanKeepsPages(t *testing.T) {
 	c := &capture{}
 	e, _ := changedWatch(t, false, c, 200)
 	if _, err := e.Scan("secsvc", "", 0); err != nil {
@@ -174,7 +234,18 @@ func TestPagerStopFailsQueued(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("pager did not stop")
 	}
-	if c.posts > 2 || countAction(actions(t, e), "page.failed")+countAction(actions(t, e), "page.sent") != 2 {
+	if c.posts != 0 || countAction(actions(t, e), "page.failed") != 0 {
 		t.Fatalf("posts %d actions %v", c.posts, actions(t, e))
 	}
+	assertPending(t, e, true)
+	sent := &capture{}
+	e2 := restart(t, e, sent)
+	if err := e2.Resume(); err != nil {
+		t.Fatal(err)
+	}
+	drainPages(e2)
+	if sent.posts != 2 || countAction(actions(t, e2), "page.sent") != 2 {
+		t.Fatalf("posts %d actions %v", sent.posts, actions(t, e2))
+	}
+	assertPending(t, e2, false)
 }

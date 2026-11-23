@@ -604,27 +604,40 @@ func Serve(ctx context.Context, opt Options) error {
 		Sender: &notify.Sender{Log: logCode}, Log: logCode,
 	}
 	srv := newHTTPServer(&Server{Host: opt.Host, Pub: pub, Eng: eng, Now: opt.Now})
+	if err := eng.Resume(); err != nil {
+		logCode(codes.Code(err))
+	}
+	// The pager stops only after the scan loop has returned, so a scan that
+	// finishes during shutdown still hands its pages over; whatever is left
+	// stays pending on disk for Resume.
 	loopCtx, loopCancel := context.WithCancel(context.Background())
-	var wg sync.WaitGroup
-	wg.Add(2)
+	pagerCtx, pagerCancel := context.WithCancel(context.Background())
+	var loopWG, pagerWG sync.WaitGroup
+	loopWG.Add(1)
+	pagerWG.Add(1)
 	go func() {
-		defer wg.Done()
+		defer loopWG.Done()
 		eng.Loop(loopCtx, opt.Interval)
 	}()
 	go func() {
-		defer wg.Done()
-		eng.Pager(loopCtx)
+		defer pagerWG.Done()
+		eng.Pager(pagerCtx)
 	}()
+	stop := func() {
+		loopCancel()
+		loopWG.Wait()
+		pagerCancel()
+		pagerWG.Wait()
+	}
 	errc := make(chan error, 1)
 	go func() {
 		errc <- srv.Serve(ln)
 	}()
 	select {
 	case <-ctx.Done():
-		return shutdown(srv, loopCancel, &wg, opt.Socket, errc)
+		return shutdown(srv, stop, opt.Socket, errc)
 	case err := <-errc:
-		loopCancel()
-		wg.Wait()
+		stop()
 		uerr := unlinkIfSocket(opt.Socket)
 		if cerr := asCode(err); cerr != nil {
 			return cerr
@@ -653,12 +666,11 @@ func finishListen(ln net.Listener, path string, cause error) error {
 	return cause
 }
 
-func shutdown(srv *http.Server, loopCancel context.CancelFunc, wg *sync.WaitGroup, path string, errc <-chan error) error {
+func shutdown(srv *http.Server, stop func(), path string, errc <-chan error) error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), shutdownWait)
 	serr := srv.Shutdown(shutCtx)
 	cancel()
-	loopCancel()
-	wg.Wait()
+	stop()
 	uerr := unlinkIfSocket(path)
 	var serveErr error
 	select {

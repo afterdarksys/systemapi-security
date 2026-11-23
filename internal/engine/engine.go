@@ -629,7 +629,7 @@ func (e *Engine) Scan(actor, lease string, exp int64) ([]ids.Finding, error) {
 		prev.Summary = f.Summary
 		prev.Severity = f.Severity
 		prev.Subject = f.Subject
-		if f.Severity == ids.SevHigh && !prev.Paged {
+		if f.Severity == ids.SevHigh && !prev.Paged && !prev.Pending {
 			if err := e.page(actor, lease, id, f, &prev, &st, now, &jobs); err != nil {
 				return nil, err
 			}
@@ -736,8 +736,9 @@ func (e *Engine) auditFinding(actor, lease, action string, f ids.Finding, now ti
 // page decides the page for a high finding. A missing contact marks it
 // paged; a bad contact or no sender is audited page.failed and left unpaged,
 // so the next scan retries; a page within a minute of the same kind is
-// audited page.coalesced. Otherwise the finding is marked paged and a job is
-// queued for the pager, which runs after the scan commits.
+// audited page.coalesced. Otherwise the finding is marked pending, durably
+// with the scan's commit, and a job is queued for the pager; it becomes
+// paged only when the page is sent.
 func (e *Engine) page(actor, lease, id string, f ids.Finding, rec *store.OpenRec, st *store.IDSState, now time.Time, jobs *[]pageJob) error {
 	rec.Paged = false
 	raw, err := e.Store.Contact()
@@ -768,7 +769,7 @@ func (e *Engine) page(actor, lease, id string, f ids.Finding, rec *store.OpenRec
 	}
 	ts := now.UnixNano()
 	st.Coalesce[f.Kind] = ts
-	rec.Paged = true
+	rec.Pending = true
 	*jobs = append(*jobs, pageJob{
 		id: id, pageID: rec.PageID, kind: f.Kind, sha: c.SHA256, actor: actor, lease: lease,
 		ts: ts, finding: f, contact: c,
@@ -811,8 +812,9 @@ func (e *Engine) enqueue(jobs []pageJob, st *store.IDSState, detail bool, now ti
 // unpage undoes what page set for j while the finding is still the one paged.
 func unpage(st *store.IDSState, j pageJob) bool {
 	changed := false
-	if rec, ok := st.Open[j.id]; ok && rec.PageID == j.pageID && rec.Paged {
+	if rec, ok := st.Open[j.id]; ok && rec.PageID == j.pageID && (rec.Pending || rec.Paged) {
 		rec.Paged = false
+		rec.Pending = false
 		st.Open[j.id] = rec
 		changed = true
 	}
@@ -823,25 +825,77 @@ func unpage(st *store.IDSState, j pageJob) bool {
 	return changed
 }
 
-// Pager sends queued pages until ctx ends; pages still queued then are
-// page.failed and unpaged, so the next start retries them.
+// Pager sends queued pages until ctx ends. Pages still queued then stay
+// pending in ids-state.json, and Resume queues them at the next start.
+// serve stops the pager only after the scan loop has returned.
 func (e *Engine) Pager(ctx context.Context) {
 	q := e.queue()
 	for {
 		select {
 		case <-ctx.Done():
-			for {
-				select {
-				case j := <-q:
-					e.failPage(j, codes.Failed)
-				default:
-					return
-				}
-			}
+			return
 		case j := <-q:
+			if ctx.Err() != nil {
+				return
+			}
 			e.deliver(ctx, j)
 		}
 	}
+}
+
+// Resume queues the pages a previous run committed as pending but did not
+// send, after a shutdown or a crash between the commit and the send.
+// Threats: without it a crash after the commit would lose a high page
+// silently. It does not coalesce: the pending page was never sent.
+func (e *Engine) Resume() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st := e.Store.IDS()
+	cfg := e.Store.Config()
+	now := e.now()
+	keys := make([]string, 0, len(st.Open))
+	for id, rec := range st.Open {
+		if rec.Pending {
+			keys = append(keys, id)
+		}
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	sort.Strings(keys)
+	var jobs []pageJob
+	raw, cerr := e.Store.Contact()
+	c, perr := notify.Parse(raw)
+	for _, id := range keys {
+		rec := st.Open[id]
+		f := ids.Finding{Kind: rec.Kind, Severity: rec.Severity, Subject: rec.Subject, Summary: rec.Summary}
+		switch {
+		case errors.Is(cerr, store.ErrNone):
+			rec.Pending, rec.Paged = false, true
+		case cerr != nil || perr != nil || e.Sender == nil:
+			code := codes.Code(cerr)
+			if code == "" {
+				code = codes.Code(perr)
+			}
+			if code == "" {
+				code = codes.Failed
+			}
+			if err := e.auditPage("secsvc", "", "page.failed", rec.Kind, c.SHA256, rec.PageID, code, now); err != nil {
+				return err
+			}
+			rec.Pending, rec.Paged = false, false
+		default:
+			jobs = append(jobs, pageJob{
+				id: id, pageID: rec.PageID, kind: rec.Kind, sha: c.SHA256, actor: "secsvc",
+				ts: st.Coalesce[rec.Kind], finding: f, contact: c,
+			})
+		}
+		st.Open[id] = rec
+	}
+	if err := e.Store.PutIDS(st); err != nil {
+		return err
+	}
+	return e.enqueue(jobs, &st, cfg.PageDetail, now)
 }
 
 func (e *Engine) deliver(ctx context.Context, j pageJob) {
@@ -854,6 +908,16 @@ func (e *Engine) deliver(ctx context.Context, j pageJob) {
 	}
 	if err := e.auditPage(j.actor, j.lease, "page.sent", j.kind, j.sha, j.pageID, "", e.now()); err != nil {
 		e.log(codes.Code(err))
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st := e.Store.IDS()
+	if rec, ok := st.Open[j.id]; ok && rec.PageID == j.pageID && rec.Pending {
+		rec.Pending, rec.Paged = false, true
+		st.Open[j.id] = rec
+		if err := e.Store.PutIDS(st); err != nil {
+			e.log(codes.Code(err))
+		}
 	}
 }
 

@@ -96,6 +96,9 @@ type OpenRec struct {
 	Paged     bool   `json:"paged"`
 	// PageID is a random reference, the only finding identity a page carries.
 	PageID string `json:"page_id,omitempty"`
+	// Pending is a page committed for sending and not yet sent. Paged is
+	// set only once the page is sent, so a crash never loses a page.
+	Pending bool `json:"pending,omitempty"`
 }
 
 // IDSState is the detector memory. Map keys may contain a NUL.

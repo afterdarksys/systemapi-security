@@ -25,7 +25,9 @@ func TestWriteTimeoutIsTenSeconds(t *testing.T) {
 // does not hold the response, so it arrives inside the write timeout.
 func TestSlowPageDoesNotDelayScan(t *testing.T) {
 	defer func(d time.Duration) { writeTimeout = d }(writeTimeout)
-	writeTimeout = 300 * time.Millisecond
+	// Long enough for a scan's own fsyncs on a slow or busy disk, and
+	// shorter than the 5s send timeout a synchronous page would wait out.
+	writeTimeout = 3 * time.Second
 
 	f := newFix(t)
 	eng := f.srv.Eng
@@ -63,8 +65,17 @@ func TestSlowPageDoesNotDelayScan(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go eng.Pager(ctx)
+	pagerDone := make(chan struct{})
+	go func() {
+		eng.Pager(ctx)
+		close(pagerDone)
+	}()
+	// The pager writes to the state directory; it must be gone before the
+	// test's temporary directories are removed.
+	defer func() {
+		cancel()
+		<-pagerDone
+	}()
 	sockDir, err := os.MkdirTemp("", "secsvc")
 	if err != nil {
 		t.Fatal(err)
