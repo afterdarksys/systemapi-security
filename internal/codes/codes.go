@@ -41,6 +41,8 @@ const (
 	NotRegular     = "not_regular"
 	ConfigScope    = "config_scope"
 	HostUnset      = "host_unset"
+	AnchorExists   = "anchor_exists"
+	StoreBusy      = "store_busy"
 )
 
 // Error is a stable code. Error() returns only that code.

@@ -121,6 +121,10 @@ func Open(dir string, parse func(string) error) (*Store, error) {
 	if err := prepareDir(dir); err != nil {
 		return nil, err
 	}
+	// The lock is held for the life of the process; it is never closed.
+	if _, err := Lock(dir); err != nil {
+		return nil, err
+	}
 	s := &Store{dir: dir, spent: map[string]int64{}}
 	cfg, err := s.loadConfig()
 	if err != nil {
@@ -161,6 +165,33 @@ func Open(dir string, parse func(string) error) (*Store, error) {
 	s.contact = raw
 	s.hasC = ok
 	return s, nil
+}
+
+// Lock takes a POSIX write lock on dir/lock and returns its descriptor.
+// Closing the descriptor releases it. Another process holding it is
+// store_busy, so an operator command cannot run under a live daemon.
+// Threats: record locks are per process, so this does not stop two opens in
+// one process; it stops a second process (a daemon or the CLI).
+func Lock(dir string) (int, error) {
+	path := filepath.Join(dir, "lock")
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return -1, codes.E(codes.BadDir)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG {
+		unix.Close(fd)
+		return -1, codes.E(codes.BadDir)
+	}
+	lk := unix.Flock_t{Type: unix.F_WRLCK, Whence: io.SeekStart}
+	if err := unix.FcntlFlock(uintptr(fd), unix.F_SETLK, &lk); err != nil {
+		unix.Close(fd)
+		if err == unix.EAGAIN || err == unix.EACCES {
+			return -1, codes.E(codes.StoreBusy)
+		}
+		return -1, codes.E(codes.BadDir)
+	}
+	return fd, nil
 }
 
 func prepareDir(dir string) error {

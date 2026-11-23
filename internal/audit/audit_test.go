@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/afterdarksys/systemapi-security/internal/codes"
+	"golang.org/x/sys/unix"
 )
 
 func TestChainAppendAndVerify(t *testing.T) {
@@ -272,7 +273,7 @@ func TestAnchorDetectsTruncation(t *testing.T) {
 	}
 }
 
-func TestAnchorFreshLegacyAndCrash(t *testing.T) {
+func TestAnchorFreshAndCrash(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "audit.jsonl")
 	head := filepath.Join(dir, "audit.head")
@@ -291,23 +292,7 @@ func TestAnchorFreshLegacyAndCrash(t *testing.T) {
 		t.Fatalf("anchor %v %v", st, err)
 	}
 
-	// A chain from before the anchor existed gets one and an init row.
-	if err := os.Remove(head); err != nil {
-		t.Fatal(err)
-	}
-	if n, err := VerifyFile(path); err != nil || n != 1 {
-		t.Fatalf("legacy verify %d %v", n, err)
-	}
-	c, err = Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows, err := c.ReadAll()
-	if err != nil || len(rows) != 2 || rows[1].Action != "audit.anchor_init" || string(rows[1].Detail) != `{"seq":1}` {
-		t.Fatalf("legacy %+v %v", rows, err)
-	}
-
-	// A crash between the row and the anchor leaves the anchor behind.
+	// A crash between the row and the anchor leaves the anchor one behind.
 	old, err := os.ReadFile(head)
 	if err != nil {
 		t.Fatal(err)
@@ -318,7 +303,7 @@ func TestAnchorFreshLegacyAndCrash(t *testing.T) {
 	if err := os.WriteFile(head, old, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := VerifyFile(path); err != nil || n != 3 {
+	if n, err := VerifyFile(path); err != nil || n != 2 {
 		t.Fatalf("behind %d %v", n, err)
 	}
 	c, err = Open(path)
@@ -326,11 +311,148 @@ func TestAnchorFreshLegacyAndCrash(t *testing.T) {
 		t.Fatal(err)
 	}
 	now, err := os.ReadFile(head)
-	if err != nil || !bytes.Contains(now, []byte(`"seq":3`)) {
+	if err != nil || !bytes.Contains(now, []byte(`"seq":2`)) {
 		t.Fatalf("anchor not moved up: %s %v", now, err)
 	}
+	// Two or more rows past the anchor is not a crash state.
 	if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(3, 0)); err != nil {
 		t.Fatal(err)
+	}
+	if err := os.WriteFile(head, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyFile(path); codes.Code(err) != codes.AuditTruncated {
+		t.Fatalf("gap 2 verify: %v", err)
+	}
+	if _, err := Open(path); codes.Code(err) != codes.AuditTruncated {
+		t.Fatalf("gap 2 open: %v", err)
+	}
+}
+
+// A chain with no anchor is truncated, not upgraded, at open and at runtime.
+func TestMissingAnchorIsTruncated(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	head := filepath.Join(dir, "audit.head")
+	c, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(int64(i), 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(head); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyFile(path); codes.Code(err) != codes.AuditTruncated {
+		t.Fatalf("verify: %v", err)
+	}
+	if _, err := Open(path); codes.Code(err) != codes.AuditTruncated {
+		t.Fatalf("open: %v", err)
+	}
+	lines := strings.SplitAfter(string(raw), "\n")
+	if err := os.WriteFile(path, []byte(lines[0]+lines[1]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := c.ReadAll(); codes.Code(err) != codes.AuditTruncated {
+		t.Fatalf("runtime: %d rows %v", len(rows), err)
+	}
+	if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(9, 0)); codes.Code(err) != codes.AuditBad {
+		t.Fatalf("append after truncation: %v", err)
+	}
+
+	// Both files gone under a running chain is truncated too.
+	dir2 := t.TempDir()
+	path2 := filepath.Join(dir2, "audit.jsonl")
+	c2, err := Open(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c2.Append("a", "lease-0001", "config.set", nil, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path2); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir2, "audit.head")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.ReadAll(); codes.Code(err) != codes.AuditTruncated {
+		t.Fatalf("both gone: %v", err)
+	}
+}
+
+func TestAnchorCommand(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	head := filepath.Join(dir, "audit.head")
+	if n, err := Anchor(path, time.Unix(1, 0)); err != nil || n != 0 {
+		t.Fatalf("empty %d %v", n, err)
+	}
+	if _, err := os.Lstat(head); !os.IsNotExist(err) {
+		t.Fatal("empty chain anchored")
+	}
+	raw := threeRows(t, path)
+	if err := os.Remove(head); err != nil {
+		t.Fatal(err)
+	}
+	n, err := Anchor(path, time.Unix(5, 0))
+	if err != nil || n != 4 {
+		t.Fatalf("anchor %d %v", n, err)
+	}
+	c, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := c.ReadAll()
+	if err != nil || len(rows) != 4 || rows[3].Action != "audit.anchor_init" {
+		t.Fatalf("%+v %v", rows, err)
+	}
+	want := `{"hash":"` + rows[2].Hash + `","seq":3}`
+	if string(rows[3].Detail) != want {
+		t.Fatalf("detail %s want %s", rows[3].Detail, want)
+	}
+	if _, err := Anchor(path, time.Unix(6, 0)); codes.Code(err) != codes.AnchorExists {
+		t.Fatalf("second anchor: %v", err)
+	}
+	// A broken chain is not anchored.
+	if err := os.Remove(head); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(flipHash(strings.SplitAfter(string(raw), "\n")[0])), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Anchor(path, time.Unix(7, 0)); codes.Code(err) != codes.AuditBad {
+		t.Fatalf("broken: %v", err)
+	}
+	if _, err := os.Lstat(head); !os.IsNotExist(err) {
+		t.Fatal("broken chain anchored")
+	}
+}
+
+func TestStateOpenDoesNotBlockOnFIFO(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "audit.jsonl")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Skip("mkfifo:", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := readAll(fifo)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if codes.Code(err) != codes.AuditBad {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("blocked on a FIFO")
 	}
 }
 

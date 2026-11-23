@@ -28,6 +28,7 @@ import (
 	"github.com/afterdarksys/systemapi-security/internal/grant"
 	"github.com/afterdarksys/systemapi-security/internal/notify"
 	"github.com/afterdarksys/systemapi-security/internal/paths"
+	"github.com/afterdarksys/systemapi-security/internal/store"
 	"golang.org/x/sys/unix"
 )
 
@@ -315,7 +316,7 @@ func callRoute(verb string) (method, path, kind string, err error) {
 }
 
 func cmdAudit(args []string) int {
-	if len(args) == 0 || args[0] != "verify" {
+	if len(args) == 0 || (args[0] != "verify" && args[0] != "anchor") {
 		return fail(2, codes.Usage)
 	}
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
@@ -328,7 +329,12 @@ func cmdAudit(args []string) int {
 	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
 		return fail(2, codes.BadDir)
 	}
-	n, err := audit.VerifyFile(filepath.Join(*dir, "audit.jsonl"))
+	var n int
+	if args[0] == "anchor" {
+		n, err = anchor(*dir)
+	} else {
+		n, err = audit.VerifyFile(filepath.Join(*dir, "audit.jsonl"))
+	}
 	if err != nil {
 		code := codes.Code(err)
 		exit := 1
@@ -345,6 +351,17 @@ func cmdAudit(args []string) int {
 		return fail(1, codes.Failed)
 	}
 	return writeOut("%s\n", b)
+}
+
+// anchor anchors a chain written before audit.head existed. It holds the
+// store lock, so it refuses (store_busy) while a daemon owns the directory.
+func anchor(dir string) (int, error) {
+	fd, err := store.Lock(dir)
+	if err != nil {
+		return 0, err
+	}
+	defer unix.Close(fd)
+	return audit.Anchor(filepath.Join(dir, "audit.jsonl"), now())
 }
 
 func doCall(socket, method, path, doc string, body []byte) int {

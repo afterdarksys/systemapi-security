@@ -1,13 +1,16 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -15,9 +18,11 @@ import (
 	"time"
 
 	"github.com/afterdarksys/systemapi-security/internal/api"
+	"github.com/afterdarksys/systemapi-security/internal/audit"
 	"github.com/afterdarksys/systemapi-security/internal/codes"
 	"github.com/afterdarksys/systemapi-security/internal/grant"
 	"github.com/afterdarksys/systemapi-security/internal/notify"
+	"github.com/afterdarksys/systemapi-security/internal/store"
 )
 
 func capture(t *testing.T) (*bytes.Buffer, *bytes.Buffer) {
@@ -426,5 +431,97 @@ func TestShippedTemplatesHaveNoHost(t *testing.T) {
 	rc := string(mustRead(t, filepath.Join(root, "packaging", "openrc", "secsvc")))
 	if !strings.Contains(rc, "--host ${secsvc_host} ") || !strings.Contains(rc, `""|localhost|`) {
 		t.Fatal("openrc script does not refuse an unset or localhost host")
+	}
+}
+
+// TestHelperHoldStore is not a test: TestAuditAnchor runs it in a child
+// process to hold the store lock the way a daemon does.
+func TestHelperHoldStore(t *testing.T) {
+	dir := os.Getenv("SECSVC_HOLD_STORE")
+	if dir == "" {
+		t.Skip("helper")
+	}
+	// The unanchored chain would make Open itself refuse, so that case takes
+	// only the lock; a fresh directory is held through store.Open.
+	if os.Getenv("SECSVC_HOLD_OPEN") != "" {
+		if _, err := store.Open(dir, nil); err != nil {
+			t.Fatal(err)
+		}
+	} else if _, err := store.Lock(dir); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout.WriteString("held\n")
+	io.Copy(io.Discard, os.Stdin)
+}
+
+func TestAuditAnchor(t *testing.T) {
+	out, errb := capture(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	c, err := audit.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(1_700_000_000, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Remove(audit.HeadPath(path)); err != nil {
+		t.Fatal(err)
+	}
+	want(t, out, errb, []string{"audit", "verify", "--dir", dir}, 1, codes.AuditTruncated+"\n")
+
+	// Another process holds the store: anchor refuses.
+	release := holdStore(t, dir, false)
+	want(t, out, errb, []string{"audit", "anchor", "--dir", dir}, 1, codes.StoreBusy+"\n")
+	release()
+	// store.Open takes the same lock, so a running daemon blocks anchor.
+	fresh := t.TempDir()
+	release = holdStore(t, fresh, true)
+	want(t, out, errb, []string{"audit", "anchor", "--dir", fresh}, 1, codes.StoreBusy+"\n")
+	release()
+
+	out.Reset()
+	errb.Reset()
+	if c := Main([]string{"audit", "anchor", "--dir", dir}); c != 0 || out.String() != `{"ok":true,"rows":3}`+"\n" {
+		t.Fatalf("%d %q %q", c, out.String(), errb.String())
+	}
+	out.Reset()
+	if c := Main([]string{"audit", "verify", "--dir", dir}); c != 0 || out.String() != `{"ok":true,"rows":3}`+"\n" {
+		t.Fatalf("%d %q %q", c, out.String(), errb.String())
+	}
+	want(t, out, errb, []string{"audit", "anchor", "--dir", dir}, 1, codes.AnchorExists+"\n")
+}
+
+func holdStore(t *testing.T, dir string, open bool) func() {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperHoldStore$")
+	cmd.Env = append(os.Environ(), "SECSVC_HOLD_STORE="+dir)
+	if open {
+		cmd.Env = append(cmd.Env, "SECSVC_HOLD_OPEN=1")
+	}
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil || line != "held\n" {
+		stdin.Close()
+		cmd.Wait()
+		t.Fatalf("helper %q %v", line, err)
+	}
+	return func() {
+		stdin.Close()
+		if err := cmd.Wait(); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

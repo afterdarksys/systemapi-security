@@ -89,6 +89,7 @@ Mode `0700`. Files are mode `0600`.
 | `spent.json` | lease id to expiry |
 | `audit.jsonl` | hash chain |
 | `audit.head` | anchor: last seq and hash of the chain |
+| `lock` | POSIX record lock held by the daemon for its lifetime |
 | `findings.jsonl` | capped edge log, 500 lines or 1 MiB |
 
 `GET /v1/config` returns `contact_sha256` and `contact_state`. The contact URL is not a response field and is not an audit field.
@@ -97,9 +98,11 @@ Mode `0700`. Files are mode `0600`.
 
 Each row's hash is SHA-256 over the canonical JSON of `seq`, `prev`, `time`, `actor`, `lease_id`, `action`, and `detail`. The first `prev` is 64 zero hex digits. A rewritten, reordered, truncated, or extra-field line fails verification. A symlink is not followed. A failed append marks the chain broken so later appends fail closed. `secsvc audit verify --dir DIR` checks `audit.jsonl` with no grant. A missing chain with no anchor verifies as zero rows.
 
-`audit.head` holds `seq` and `hash` of the last row. It is written atomically after each append (temp file, fsync, rename, directory fsync) and read before the chain. Open and verify return `audit_truncated` when the chain ends before the anchor's seq, when the row at that seq has a different hash, or when the chain is missing or empty while the anchor exists. An anchor behind the chain (a crash between the two writes) is moved up on open. A chain written before the anchor existed gets one on open, plus an `audit.anchor_init` row naming the seq it starts from.
+`audit.head` holds `seq` and `hash` of the last row. It is created with the first row, written atomically after each append (temp file, fsync, rename, directory fsync), and read before the chain. Open, verify, and every runtime re-read (status, `GET /v1/audit`) return `audit_truncated` when the chain ends before the anchor's seq, when the row at that seq has a different hash, when the chain is more than one row past the anchor, when the chain is missing or empty while the anchor exists, or when a non-empty chain has no anchor. An anchor exactly one row behind (a crash between the row and the anchor) is moved up on open. A running daemon also checks that the row it last wrote is still on disk with the same hash, so deleting the anchor and truncating the chain under it is `audit_truncated` too.
 
-**Residual:** the anchor is local. Root, or anyone who can write the state directory, can rewrite or delete both files together, and deleting only the anchor makes the next open treat the chain as a pre-anchor chain. The anchor stops a truncation of the chain alone, not an attacker with the directory. An off-host anchor, kept by the agent, is a later batch.
+A chain written before anchors existed is anchored once by the operator: `secsvc audit anchor --dir DIR` verifies the whole chain, writes the anchor, and appends `audit.anchor_init` with the `seq` and `hash` it anchored. It holds the store lock (`lock`, a POSIX record lock that `serve` takes for its lifetime), so it refuses with `store_busy` while a daemon owns the directory, and refuses with `anchor_exists` when an anchor is already there.
+
+**Residual:** the anchor is local. Root, or anyone who can write the state directory, can rewrite or delete both files together while the daemon is stopped, or run `secsvc audit anchor` after deleting the anchor. The anchor stops a truncation of the chain alone, not an attacker with the directory. An off-host anchor, kept by the agent, is a later batch.
 
 ## IDS
 
