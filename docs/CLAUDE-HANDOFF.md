@@ -23,7 +23,7 @@ and control-plane audit ownership in systemapi; secsvc is a single-host service.
 - HTTP over `/run/secsvc/sock`; no TCP listener. Use the existing no-proxy Unix
   client behavior. Unix socket permissions are not authorization.
 - `GET /v1/report`, `GET /v1/modules`, `GET /v1/status`, `GET /v1/catalog` require
-  `security.read` in an Ed25519 `secsvc/1` grant scoped to the exact host.
+  `security.read` in an Ed25519 `secsvc/2` grant scoped to the exact host.
 - A report has schema `secsvc-report/1`, host, generated_at, last_scan,
   config_sha256, scan_config_sha256, config_changed, system.platform,
   system.modules with per-check coverage, and findings.

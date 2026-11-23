@@ -31,6 +31,7 @@ func goodGrant(now time.Time) Grant {
 		Actor:        "ops:ryan",
 		Host:         "localhost",
 		Purpose:      PurposeRead,
+		Iat:          now.Unix(),
 		Exp:          now.Unix() + 600,
 		LeaseID:      "lease-0001",
 		Entitlements: []string{EntRead, EntAudit},
@@ -434,4 +435,88 @@ func itoa(n int64) string {
 		b[i] = '-'
 	}
 	return string(b[i:])
+}
+
+func TestIssuedAt(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	seed, pub := testKey(t)
+	sign := func(iat, exp int64) string {
+		t.Helper()
+		g := goodGrant(now)
+		g.Iat, g.Exp = iat, exp
+		return mustSign(t, seed, g)
+	}
+	n := now.Unix()
+	cases := []struct {
+		name     string
+		iat, exp int64
+		code     string
+	}{
+		{"now", n, n + 600, ""},
+		{"skew-edge", n + MaxSkew, n + MaxSkew + 1, ""},
+		{"future", n + MaxSkew + 1, n + MaxSkew + 2, codes.GrantFuture},
+		// Far-future grant in its last minutes: exp is near, but it was cut
+		// for longer than the ceiling.
+		{"long-lived", n - 3600, n + 60, codes.GrantTTL},
+		{"ttl-span", n - 1, n + MaxTTL, codes.GrantTTL},
+		{"exp-before-iat", n + 30, n + 20, codes.GrantTTL},
+		{"zero", 0, n + 600, codes.GrantBadShape},
+		{"negative", -1, n + 600, codes.GrantBadShape},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			g, err := Verify(sign(tc.iat, tc.exp), pub, "localhost", now)
+			wantCode(t, err, tc.code)
+			if err == nil && g.Iat != tc.iat {
+				t.Fatalf("iat %d", g.Iat)
+			}
+		})
+	}
+	t.Run("tamper-iat", func(t *testing.T) {
+		doc := sign(n, n+600)
+		doc = strings.Replace(doc, `"iat":`+itoa(n), `"iat":`+itoa(n-1), 1)
+		_, err := Verify(doc, pub, "localhost", now)
+		wantCode(t, err, codes.GrantBadSig)
+	})
+	t.Run("missing-iat", func(t *testing.T) {
+		doc := strings.Replace(sign(n, n+600), `"iat":`+itoa(n)+`,`, ``, 1)
+		_, err := Verify(doc, pub, "localhost", now)
+		wantCode(t, err, codes.GrantBadShape)
+	})
+}
+
+// A secsvc/1 grant, signed correctly under the old domain, is refused.
+func TestRefusesV1(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	seed, pub := testKey(t)
+	type v1 struct {
+		V            string   `json:"v"`
+		Actor        string   `json:"actor"`
+		Host         string   `json:"host"`
+		Purpose      string   `json:"purpose"`
+		Exp          int64    `json:"exp"`
+		LeaseID      string   `json:"lease_id"`
+		Entitlements []string `json:"entitlements"`
+		Watch        []string `json:"watch"`
+	}
+	body := v1{"secsvc/1", "ops:ryan", "localhost", PurposeRead, now.Unix() + 600, "lease-0001", []string{EntAudit, EntRead}, []string{"/var/lib"}}
+	raw, err := codes.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := ed25519.Sign(ed25519.NewKeyFromSeed(seed), append([]byte("secsvc-grant-v1\n"), raw...))
+	doc, err := codes.Marshal(struct {
+		v1
+		Sig string `json:"sig"`
+	}{body, base64.StdEncoding.EncodeToString(sig)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Verify(string(doc), pub, "localhost", now)
+	wantCode(t, err, codes.GrantBadShape)
+	// The same fields with a v2 iat but the old version string are refused too.
+	g := goodGrant(now)
+	g.V = "secsvc/1"
+	_, err = Verify(mustSign(t, seed, g), pub, "localhost", now)
+	wantCode(t, err, codes.GrantBadShape)
 }

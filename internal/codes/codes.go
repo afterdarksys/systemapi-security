@@ -19,6 +19,7 @@ const (
 	GrantTTL       = "grant_ttl"
 	GrantStar      = "grant_star"
 	GrantRootSlash = "grant_root_slash"
+	GrantFuture    = "grant_future"
 	Forbidden      = "forbidden"
 	BadContact     = "bad_contact"
 	BadPath        = "bad_path"

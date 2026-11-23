@@ -450,7 +450,7 @@ func writeErr(w http.ResponseWriter, code string) {
 
 func statusOf(code string) int {
 	switch code {
-	case codes.GrantMissing, codes.GrantBadSig, codes.GrantExpired:
+	case codes.GrantMissing, codes.GrantBadSig, codes.GrantExpired, codes.GrantFuture:
 		return http.StatusUnauthorized
 	case codes.GrantBadShape, codes.GrantPurpose, codes.GrantTTL, codes.GrantStar, codes.GrantRootSlash,
 		codes.BadContact, codes.BadPath, codes.Oversized, codes.BlockedAddress:

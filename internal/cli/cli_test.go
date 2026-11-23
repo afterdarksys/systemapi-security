@@ -115,7 +115,7 @@ func TestKeygenAndGrantPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g.Exp != frozen.Unix()+900 || g.LeaseID != "lease-cliok" || !reflect.DeepEqual(g.Entitlements, grant.Fill(grant.PurposeOperate)) || !reflect.DeepEqual(g.Watch, []string{"/var/lib"}) {
+	if g.Iat != frozen.Unix() || g.Exp != frozen.Unix()+900 || g.LeaseID != "lease-cliok" || !reflect.DeepEqual(g.Entitlements, grant.Fill(grant.PurposeOperate)) || !reflect.DeepEqual(g.Watch, []string{"/var/lib"}) {
 		t.Fatalf("%+v", g)
 	}
 

@@ -71,6 +71,9 @@ func (f *fix) sign(t *testing.T, g grant.Grant) string {
 	if g.Host == "" {
 		g.Host = "host1"
 	}
+	if g.Iat == 0 {
+		g.Iat = f.now.Unix()
+	}
 	if g.Exp == 0 {
 		g.Exp = f.now.Unix() + 600
 	}

@@ -1,8 +1,8 @@
 # security: a future sash verb
 
-This file is the contract for a later sash builtin. The sash table in `skills/sash/reference/verbs.md` does not contain these names, and this repository does not edit that table. Fulfillment, when it exists, is one `secsvc call` against the host Unix socket. The grant on that call is `secsvc/1` from `docs/architecture.md`. A `sash/1` lease does not authorize the socket.
+This file is the contract for a later sash builtin. The sash table in `skills/sash/reference/verbs.md` does not contain these names, and this repository does not edit that table. Fulfillment, when it exists, is one `secsvc call` against the host Unix socket. The grant on that call is `secsvc/2` from `docs/architecture.md`. A `sash/1` lease does not authorize the socket.
 
-Columns match the sash verb table. **key** is the `secsvc/1` entitlement. **mutates** is `yes` when the call spends a lease.
+Columns match the sash verb table. **key** is the `secsvc/2` entitlement. **mutates** is `yes` when the call spends a lease.
 
 | form | kind | key | mutates | what |
 | --- | --- | --- | --- | --- |

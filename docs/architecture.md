@@ -1,6 +1,6 @@
 # secsvc
 
-`secsvc` is one process on one host. sahinit supervises it when that supervisor is PID 1. The process answers HTTP over a Unix socket. Grants are `secsvc/1` Ed25519 documents. The daemon stores the public key and spends each lease id once. The audit chain is the host record.
+`secsvc` is one process on one host. sahinit supervises it when that supervisor is PID 1. The process answers HTTP over a Unix socket. Grants are `secsvc/2` Ed25519 documents. The daemon stores the public key and spends each lease id once. The audit chain is the host record.
 
 ## Startup
 
@@ -21,7 +21,7 @@ The parent of the socket is created at mode `0750` when it is missing. An existi
 
 ## Grant
 
-Domain string `secsvc-grant-v1\n`. Signature is Ed25519 and is checked before expiry, a star, a filesystem root, TTL, the purpose ceiling, and the host. Maximum document size is 16 KiB. Maximum TTL is 900 seconds. A lease id matches `^[A-Za-z0-9_-]{8,64}$`.
+Domain string `secsvc-grant-v2\n`. The signed fields are `v`, `actor`, `host`, `purpose`, `iat`, `exp`, `lease_id`, `entitlements`, and `watch`; all are required. Signature is Ed25519 and is checked before a star, a filesystem root, expiry, `iat`, TTL, the purpose ceiling, and the host. Maximum document size is 16 KiB. Maximum TTL is 900 seconds. An `iat` more than 60 seconds ahead of the daemon clock is `grant_future` (401). `exp - iat` above 900 seconds, or `exp` not after `iat`, is `grant_ttl`, so a grant cut far into the future never becomes usable in its last minutes. A `secsvc/1` grant, which has no `iat`, is `grant_bad_shape`; reissue it with this binary's `secsvc grant`, which signs `iat` as the current time. A lease id matches `^[A-Za-z0-9_-]{8,64}$`.
 
 | purpose | ceiling |
 | --- | --- |

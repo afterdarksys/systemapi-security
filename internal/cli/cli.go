@@ -141,7 +141,8 @@ func grantShape(g *grant.Grant, ttl string, ents, watch []string) error {
 	if d <= 0 || d%time.Second != 0 || d > time.Duration(grant.MaxTTL)*time.Second {
 		return codes.E(codes.GrantTTL)
 	}
-	g.Exp = now().Unix() + int64(d/time.Second)
+	g.Iat = now().Unix()
+	g.Exp = g.Iat + int64(d/time.Second)
 	if g.LeaseID != "" && !grant.LeaseOK(g.LeaseID) {
 		return codes.E(codes.GrantBadShape)
 	}

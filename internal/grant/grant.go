@@ -1,8 +1,11 @@
-// Package grant verifies secsvc/1 Ed25519 grants.
+// Package grant verifies secsvc/2 Ed25519 grants.
 //
 // Threats: a forged, swapped, expired, over-long, star, or filesystem-root
 // grant must not authorize a call. The signature is checked before expiry,
-// star, root, TTL, purpose ceiling, and host. The daemon holds only a public
+// star, root, TTL, purpose ceiling, and host. iat is signed: a grant issued in
+// the future (beyond MaxSkew) is grant_future, and exp - iat above MaxTTL is
+// grant_ttl, so a far-future grant never becomes usable in its last minutes.
+// A secsvc/1 grant has no iat and is grant_bad_shape. The daemon holds only a public
 // key. This package does not verify sash/1 or systemapi leases, does not
 // spend lease ids (the API does), and does not stop a parent-directory symlink.
 package grant
@@ -23,10 +26,11 @@ import (
 )
 
 const (
-	Version         = "secsvc/1"
-	Domain          = "secsvc-grant-v1\n"
+	Version         = "secsvc/2"
+	Domain          = "secsvc-grant-v2\n"
 	MaxDocument     = 16 << 10
 	MaxTTL          = 900
+	MaxSkew         = 60
 	MaxEntitlements = 16
 	MaxWatch        = 64
 	PurposeRead     = "security:read"
@@ -47,12 +51,13 @@ var (
 	entRe   = regexp.MustCompile(`^[a-z][a-z0-9.]{0,63}$`)
 )
 
-// Grant is a verified secsvc/1 document. Slices are sorted and non-nil.
+// Grant is a verified secsvc/2 document. Slices are sorted and non-nil.
 type Grant struct {
 	V            string
 	Actor        string
 	Host         string
 	Purpose      string
+	Iat          int64
 	Exp          int64
 	LeaseID      string
 	Entitlements []string
@@ -64,6 +69,7 @@ type signed struct {
 	Actor        string   `json:"actor"`
 	Host         string   `json:"host"`
 	Purpose      string   `json:"purpose"`
+	Iat          int64    `json:"iat"`
 	Exp          int64    `json:"exp"`
 	LeaseID      string   `json:"lease_id"`
 	Entitlements []string `json:"entitlements"`
@@ -148,6 +154,7 @@ func Sign(seed []byte, g Grant) ([]byte, error) {
 		Actor:        g.Actor,
 		Host:         g.Host,
 		Purpose:      g.Purpose,
+		Iat:          g.Iat,
 		Exp:          g.Exp,
 		LeaseID:      g.LeaseID,
 		Entitlements: norm(g.Entitlements),
@@ -167,7 +174,7 @@ func Sign(seed []byte, g Grant) ([]byte, error) {
 }
 
 // Verify checks doc against pub for daemon host at now.
-// Order: shape, then signature, then star, root, expiry, TTL, purpose, host.
+// Order: shape, then signature, then star, root, expiry, iat, TTL, purpose, host.
 func Verify(doc string, pub ed25519.PublicKey, host string, now time.Time) (*Grant, error) {
 	if doc == "" {
 		return nil, codes.E(codes.GrantMissing)
@@ -190,7 +197,7 @@ func Verify(doc string, pub ed25519.PublicKey, host string, now time.Time) (*Gra
 	if err := dec2.Decode(&raw); err != nil {
 		return nil, codes.E(codes.GrantBadShape)
 	}
-	for _, k := range []string{"v", "actor", "host", "purpose", "exp", "lease_id", "entitlements", "watch", "sig"} {
+	for _, k := range []string{"v", "actor", "host", "purpose", "iat", "exp", "lease_id", "entitlements", "watch", "sig"} {
 		b, ok := raw[k]
 		if !ok || strings.TrimSpace(string(b)) == "null" {
 			return nil, codes.E(codes.GrantBadShape)
@@ -223,7 +230,10 @@ func Verify(doc string, pub ed25519.PublicKey, host string, now time.Time) (*Gra
 	if w.Exp <= nowS {
 		return nil, codes.E(codes.GrantExpired)
 	}
-	if w.Exp > nowS+MaxTTL {
+	if w.Iat > nowS+MaxSkew {
+		return nil, codes.E(codes.GrantFuture)
+	}
+	if w.Exp <= w.Iat || w.Exp-w.Iat > MaxTTL || w.Exp > nowS+MaxTTL {
 		return nil, codes.E(codes.GrantTTL)
 	}
 	if err := ceilingOK(w.Purpose, w.Entitlements); err != nil {
@@ -237,6 +247,7 @@ func Verify(doc string, pub ed25519.PublicKey, host string, now time.Time) (*Gra
 		Actor:        w.Actor,
 		Host:         w.Host,
 		Purpose:      w.Purpose,
+		Iat:          w.Iat,
 		Exp:          w.Exp,
 		LeaseID:      w.LeaseID,
 		Entitlements: norm(w.Entitlements),
@@ -245,7 +256,7 @@ func Verify(doc string, pub ed25519.PublicKey, host string, now time.Time) (*Gra
 }
 
 func shape(w wire) error {
-	if w.V != Version || !actorRe.MatchString(w.Actor) || !hostRe.MatchString(w.Host) || !leaseRe.MatchString(w.LeaseID) {
+	if w.V != Version || w.Iat <= 0 || !actorRe.MatchString(w.Actor) || !hostRe.MatchString(w.Host) || !leaseRe.MatchString(w.LeaseID) {
 		return codes.E(codes.GrantBadShape)
 	}
 	switch w.Purpose {
