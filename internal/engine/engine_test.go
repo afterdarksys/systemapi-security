@@ -718,3 +718,20 @@ func TestDropWatchResolves(t *testing.T) {
 		t.Fatalf("found %v actions %v", found, actions(t, e))
 	}
 }
+
+func TestAuditCapTruncated(t *testing.T) {
+	e, dir := newEng(t)
+	if err := e.Store.AppendAudit("secsvc", "lease-trunc", "scan", nil, frozen); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "audit.jsonl"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := e.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := capBy(st, "audit"); c.State != caps.StateDegraded || c.Reason != caps.ReasonAuditBad {
+		t.Fatalf("audit %+v", c)
+	}
+}

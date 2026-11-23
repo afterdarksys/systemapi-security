@@ -142,7 +142,7 @@ func (e *Engine) auditCheck() error {
 	if err == nil {
 		return nil
 	}
-	if codes.Code(err) == codes.AuditBad {
+	if c := codes.Code(err); c == codes.AuditBad || c == codes.AuditTruncated {
 		return caps.ErrAudit
 	}
 	return caps.ErrProbe
