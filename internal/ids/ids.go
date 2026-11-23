@@ -98,7 +98,8 @@ type AuthPos struct {
 //
 // Threats: (a) rotation is a different inode or device, or a size below the
 // offset, and restarts at 0, so a new file that grew past the old offset is
-// not skipped. (b) A first scan of a path, with no saved position for it,
+// not skipped. Copytruncate keeps the inode, so lines written after the
+// copy and past the saved offset before the next scan can be missed. (b) A first scan of a path, with no saved position for it,
 // starts at the end of the file and pages on nothing: old lines would be
 // dated now. (c) The IP comes only from sshd's fixed structure, never from a
 // substring an attacker can put in a user name.

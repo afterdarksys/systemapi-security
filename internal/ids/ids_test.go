@@ -476,3 +476,21 @@ func TestLineIPFromSSHDStructureOnly(t *testing.T) {
 		}
 	}
 }
+
+// A different device with the same inode number is a different file.
+func TestAuthRotationByDevice(t *testing.T) {
+	logp := filepath.Join(t.TempDir(), "auth.log")
+	body := strings.Repeat("Failed password for root from 5.6.7.8 port 22 ssh2\n", 3)
+	if err := os.WriteFile(logp, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pos := at(t, logp, int64(len(body)))
+	if _, ev, _ := ScanAuth(logp, pos, nil, 3, 300, time.Unix(1_700_000_000, 0)); len(ev) != 0 {
+		t.Fatalf("same file re-read: %v", ev)
+	}
+	pos.Dev++
+	_, ev, f := ScanAuth(logp, pos, nil, 3, 300, time.Unix(1_700_000_000, 0))
+	if len(ev) != 3 || f == nil {
+		t.Fatalf("device change missed: %v %+v", ev, f)
+	}
+}
