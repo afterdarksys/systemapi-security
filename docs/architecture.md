@@ -8,7 +8,7 @@
 
 Order after that check:
 
-1. An empty `--host` or `localhost` is `host_unset`, before the state directory exists. Then host grammar, then load the public key. Log step `validate`.
+1. A `--host` that names no machine is `host_unset`, before the state directory exists: empty, `localhost`, `localhost.localdomain`, `ip6-localhost`, `ip6-loopback`, `localhost6`, `localhost6.localdomain6`, any name under `.localhost`, or an IP literal. Names are not resolved. Then host grammar, then load the public key. Log step `validate`.
 2. Open the state directory at mode `0700`. Log step `store`.
 3. Listen on the absolute socket path. Log step `listen`.
 4. `chmod` the socket to `0660`.

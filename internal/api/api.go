@@ -499,9 +499,7 @@ func Serve(ctx context.Context, opt Options) error {
 	if opt.Interval < MinInterval {
 		return codes.E(codes.Usage)
 	}
-	// Threats: a placeholder host would make every grant for that name valid
-	// on every host that ships the same template. Refuse it before any state.
-	if opt.Host == "" || opt.Host == "localhost" {
+	if placeholderHost(opt.Host) {
 		return codes.E(codes.HostUnset)
 	}
 	if !grant.HostOK(opt.Host) {
@@ -567,6 +565,19 @@ func Serve(ctx context.Context, opt Options) error {
 		}
 		return uerr
 	}
+}
+
+// placeholderHost reports a host that names no particular machine.
+// Threats: a placeholder host would make every grant for that name valid on
+// every host that ships the same template. Empty, the loopback names, any
+// name under .localhost, and any IP literal are refused before any state.
+// Names are not resolved: startup does no DNS.
+func placeholderHost(h string) bool {
+	switch h {
+	case "", "localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback", "localhost6", "localhost6.localdomain6":
+		return true
+	}
+	return strings.HasSuffix(h, ".localhost") || net.ParseIP(h) != nil
 }
 
 func finishListen(ln net.Listener, path string, cause error) error {

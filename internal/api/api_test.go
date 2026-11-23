@@ -807,8 +807,16 @@ func TestServeCreatesParent(t *testing.T) {
 	}
 }
 
+func TestRealHostIsNotPlaceholder(t *testing.T) {
+	for _, h := range []string{"host1", "web-1.example.com", "localhostx", "my-localhost"} {
+		if placeholderHost(h) {
+			t.Errorf("%q refused", h)
+		}
+	}
+}
+
 func TestServeRefusesPlaceholderHost(t *testing.T) {
-	for _, host := range []string{"", "localhost"} {
+	for _, host := range []string{"", "localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback", "localhost6", "a.localhost", "127.0.0.1", "10.0.0.5", "1.2.3.4"} {
 		dir := filepath.Join(t.TempDir(), "state")
 		err := Serve(context.Background(), Options{Dir: dir, Interval: DefaultInterval, Host: host, PubPath: filepath.Join(dir, "missing"), Socket: "/tmp/not-used"})
 		if codes.Code(err) != codes.HostUnset {
