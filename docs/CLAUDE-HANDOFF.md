@@ -125,25 +125,30 @@ for the exact contract. In short:
 - Detection: a head whose `seq` is lower than a stored one, or whose `hash`
   differs at a `seq` already seen, is a truncation or rewrite. Alert; do not
   overwrite the stored head.
-- `POST /v1/audit/witness` (`security.witness`, which `security:read` lacks:
-  issue a `security:config` grant narrowed to `security.audit` and
-  `security.witness`; it spends its lease) takes
-  `{"seq","hash","witness","time"}` with `witness` an identifier of the
-  collecting party and `time` RFC 3339. Post back a head you stored earlier.
-  `200 {"ok":true}` means the chain still holds it. `audit_truncated` means it
-  does not: the host now reports `audit_truncated` until an operator acts, and
-  this is the event the dashboard must surface.
+- `POST /v1/audit/witness` needs a `security:witness` grant (its own purpose,
+  ceiling `security.audit` and `security.witness`; no other purpose carries
+  it; it spends its lease) and takes `{"seq","hash","witness","time"}` with
+  `witness` an identifier of the collecting party (at most 128 characters)
+  and `time` RFC 3339 (at most 35). Post back a head you stored earlier.
+  `200 {"ok":true}` means the chain holds it and it is stored. `409
+  witness_mismatch` means the chain does not hold it now (a seq past the end,
+  or another hash): that is the truncation or rewrite event the dashboard
+  must surface; the host refuses and audits it (`audit.witness_refused`) but
+  stays up. `409 witness_unverifiable` means the row is in a segment the host
+  pruned; post a newer head. A stored witness that stops matching later makes
+  the host report `audit_truncated` until an operator acts.
 - Cadence: one head fetch and at most one witness per collection interval is
   enough; the host keeps the newest 500 witnesses. Do not call
-  `GET /v1/audit/verify` on a schedule: it walks every segment and is limited
-  to once a minute.
+  `GET /v1/audit/verify` on a schedule: it walks every segment, runs one at a
+  time, and is limited to once a minute per grant actor.
 - What it proves: the host signed what it said, when the collector saw it.
   Root on the host holds the anchor key, so it can sign a rewritten chain
   going forward; the protection is that the collector's stored heads and
   witnesses are out of root's reach.
 - Tests the collector needs: valid head; bad signature; wrong pinned key;
   seq regression; hash change at a known seq; witness accepted; witness
-  refused with `audit_truncated`; grant without `security.witness`; spent
+  refused with `witness_mismatch` and `witness_unverifiable`; a grant of
+  another purpose; spent
   lease; daemon offline.
 
 ## Local-core follow-ups before broad production claims

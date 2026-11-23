@@ -25,10 +25,10 @@ go build -o secsvc ./cmd/secsvc
 
 - The audit chain is segmented under `audit/`. A state directory with `audit.jsonl` is refused with `audit_layout`; with the daemon stopped, run `secsvc audit migrate --dir /var/lib/secsvc` (run `secsvc audit anchor` first if it reports `audit_truncated` on a chain from before `audit.head`).
 - `GET /v1/audit?limit=N` returns rows from the newest segment only; use `GET /v1/audit/verify` or `secsvc audit verify` for the whole chain.
-- `GET /v1/audit/verify` is rate-limited to once a minute (`429` `rate_limited`); poll the cheaper `GET /v1/status` instead.
+- `GET /v1/audit/verify` runs one walk at a time and once a minute per grant actor (`429` `rate_limited`); poll the cheaper `GET /v1/status` instead.
 - Page bodies no longer name the host, a path, a subject, or an address; look a page's `ref` up in `secsvc call findings` (`page_id`), or set `page_detail: true` in the config to restore the old bodies.
 - Audit actions `notify.sent`, `notify.failed` and `notify.coalesced` are now `page.sent`, `page.failed` and `page.coalesced`; update anything that filters the audit by action.
-- `security:config` and `security:operate` grants now carry `security.witness` when issued with no `--entitlement` flags; pass explicit `--entitlement` flags to keep a grant without it.
+- Posting a witness needs the new purpose `security:witness` (ceiling `security.audit`, `security.witness`); no other purpose carries it, so issue the collector `secsvc grant --purpose security:witness`.
 - `audit_keep_segments` and `page_detail` changes need a grant whose `--watch` covers the state directory (`config_scope` otherwise); issue the grant with `--watch /var/lib/secsvc`.
 
 ## Operator
