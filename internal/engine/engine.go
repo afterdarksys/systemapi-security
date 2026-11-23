@@ -315,11 +315,11 @@ func (e *Engine) Audit(limit int) ([]audit.Row, error) {
 	return e.Store.AuditTail(limit)
 }
 
-// VerifyAudit walks every segment and returns the rows on disk. It holds
-// the engine lock for the walk, so the API rate-limits it.
+// VerifyAudit walks every segment and returns the rows on disk. It does not
+// take the engine lock: the chain snapshots the newest segment under its own
+// lock and walks the immutable closed segments without it, so scans and
+// appends go on during the walk.
 func (e *Engine) VerifyAudit() (int, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	return e.Store.AuditVerify()
 }
 
@@ -365,8 +365,11 @@ func (e *Engine) AuditHead() (SignedHead, error) {
 }
 
 // Witness stores an off-host witness record and audits it.
-// Threats: the body is strict; the lease is spent before the commit; a
-// witness the chain does not hold is audit_truncated and breaks the chain.
+// Threats: the body is strict; the lease is spent before the commit. A
+// witness the chain does not hold now is refused (witness_mismatch or
+// witness_unverifiable), not stored, and audited as audit.witness_refused
+// with the actor and lease of the verified grant, so a bad witness is
+// traceable; the caller-chosen witness label is detail only.
 func (e *Engine) Witness(actor, lease string, exp int64, body []byte) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -382,6 +385,20 @@ func (e *Engine) Witness(actor, lease string, exp int64, body []byte) error {
 		return err
 	}
 	if err := e.Store.AddWitness(w); err != nil {
+		code := codes.Code(err)
+		if code != codes.WitnessMismatch && code != codes.WitnessUnverifiable {
+			return err
+		}
+		refused, derr := mustDetail(struct {
+			audit.Witness
+			Error string `json:"error"`
+		}{w, code})
+		if derr != nil {
+			return derr
+		}
+		if aerr := e.Store.AppendAudit(actor, lease, "audit.witness_refused", refused, e.now()); aerr != nil {
+			return aerr
+		}
 		return err
 	}
 	return e.Store.AppendAudit(actor, lease, "audit.witness", detail, e.now())

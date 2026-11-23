@@ -61,7 +61,8 @@ type Server struct {
 	Now  func() time.Time
 
 	verifyMu   sync.Mutex
-	lastVerify time.Time
+	verifying  bool
+	lastVerify map[string]time.Time // by grant actor
 }
 
 type route struct {
@@ -247,7 +248,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/v1/audit":
 		s.audit(w, limit)
 	case "/v1/audit/verify":
-		s.verify(w)
+		s.verify(w, g.Actor)
 	case "/v1/audit/head":
 		s.writeCall(w, func() (any, error) { return s.Eng.AuditHead() })
 	case "/v1/audit/witness":
@@ -387,19 +388,35 @@ func (s *Server) audit(w http.ResponseWriter, limit int) {
 	}{out})
 }
 
-// verify is the full walk. Threats: it reads every segment while holding the
-// engine lock, so one authorized caller could stall scans by looping it; a
-// second call within verifyEvery is rate_limited (429) before any read.
-func (s *Server) verify(w http.ResponseWriter) {
+// verify is the full walk. Threats: it reads every segment, so it is
+// expensive even though it no longer holds the engine lock. One walk runs at
+// a time, and each grant actor gets one walk per verifyEvery, so one read
+// grant cannot hold the slot for everyone. Any other call is rate_limited
+// (429) at once, before any read, without waiting.
+func (s *Server) verify(w http.ResponseWriter, actor string) {
 	s.verifyMu.Lock()
 	now := s.now()
-	if !s.lastVerify.IsZero() && now.Sub(s.lastVerify) < verifyEvery && !now.Before(s.lastVerify) {
+	if s.lastVerify == nil {
+		s.lastVerify = map[string]time.Time{}
+	}
+	for a, t := range s.lastVerify {
+		if now.Sub(t) >= verifyEvery || now.Before(t) {
+			delete(s.lastVerify, a)
+		}
+	}
+	if _, recent := s.lastVerify[actor]; recent || s.verifying {
 		s.verifyMu.Unlock()
 		writeErr(w, codes.RateLimited)
 		return
 	}
-	s.lastVerify = now
+	s.lastVerify[actor] = now
+	s.verifying = true
 	s.verifyMu.Unlock()
+	defer func() {
+		s.verifyMu.Lock()
+		s.verifying = false
+		s.verifyMu.Unlock()
+	}()
 	n, err := s.Eng.VerifyAudit()
 	if err != nil {
 		writeCode(w, err)
@@ -509,6 +526,8 @@ func statusOf(code string) int {
 		return http.StatusMethodNotAllowed
 	case codes.RateLimited:
 		return http.StatusTooManyRequests
+	case codes.WitnessMismatch, codes.WitnessUnverifiable:
+		return http.StatusConflict
 	default:
 		return http.StatusInternalServerError
 	}

@@ -133,19 +133,21 @@ func (o Options) norm() (Options, error) {
 
 // Chain is an open segmented chain. Appends are serialized.
 type Chain struct {
-	mu     sync.Mutex
-	dir    string
-	opt    Options
-	keep   int
-	index  []entry
-	seg    int   // the open segment: len(index)+1
-	rows   int   // rows in the open segment
-	size   int64 // bytes in the open segment
-	seq    int64
-	prev   string
-	low    int // lowest segment number still on disk
-	wit    *Witness
-	broken bool
+	mu    sync.Mutex
+	dir   string
+	opt   Options
+	keep  int
+	index []entry
+	seg   int   // the open segment: len(index)+1
+	rows  int   // rows in the open segment
+	size  int64 // bytes in the open segment
+	seq   int64
+	prev  string
+	low   int // lowest segment number still on disk
+	wit   *Witness
+	// walking counts full walks in progress; prune defers deletes meanwhile.
+	walking int
+	broken  bool
 }
 
 func segName(n int) string { return fmt.Sprintf("%06d.jsonl", n) }
@@ -606,6 +608,9 @@ func (c *Chain) prune(now time.Time) error {
 	if _, err := c.appendLocked("secsvc", "", "audit.pruned", detail, now); err != nil {
 		return err
 	}
+	if c.walking > 0 {
+		return nil
+	}
 	for n := c.low; n <= through; n++ {
 		if err := os.Remove(segPath(c.dir, n)); err != nil && !os.IsNotExist(err) {
 			return nil
@@ -707,22 +712,48 @@ func (c *Chain) Head() (int64, string, int, error) {
 	return c.seq, c.prev, seg, nil
 }
 
-// Verify is the full check: the runtime read, then a walk of every retained
-// segment. A failure marks the chain broken.
+// Verify is the full check: the runtime read under the chain lock, then a
+// walk of every retained segment without it. Closed segments do not change,
+// so the walk uses the index, newest segment, anchor and witnesses as they
+// were under the lock; a prune that lands during the walk leaves its files
+// for the next roll. A failure marks the chain broken.
 func (c *Chain) Verify() (int, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, err := c.check(); err != nil {
+	rows, err := c.check()
+	var s snap
+	if err == nil {
+		var wits []Witness
+		wits, err = readWitnesses(c.dir)
+		s = snap{
+			a: anchor{Seq: c.seq, Hash: c.prev}, hasA: c.seq > 0, seg: true,
+			idx: append([]entry(nil), c.index...), open: rows, wits: wits,
+		}
+	}
+	if err != nil {
 		c.broken = true
+		c.mu.Unlock()
 		return 0, err
 	}
-	n, err := verifyAll(c.dir)
+	c.walking++
+	c.mu.Unlock()
+	n, err := walkAll(c.dir, s)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.walking--
 	if err != nil {
 		c.broken = true
 		return 0, err
 	}
 	return n, nil
 }
+
+// WitnessError is audit_truncated caused by a stored witness. Seq names the
+// witness, so an operator knows which off-host record disagrees.
+type WitnessError struct{ Seq int64 }
+
+func (e *WitnessError) Error() string { return codes.AuditTruncated }
+
+func (e *WitnessError) Unwrap() error { return codes.E(codes.AuditTruncated) }
 
 // verifyRetry is a test hook called before each VerifyDir retry.
 var verifyRetry func(attempt int)
@@ -751,50 +782,73 @@ func VerifyDir(dir string) (int, error) {
 	return 0, err
 }
 
-// verifyAll walks every retained segment against the index, the anchor, the
+// snap is what a full walk checks against. open is the newest segment's
+// rows when diskOpen is false.
+type snap struct {
+	a        anchor
+	hasA     bool
+	seg      bool
+	idx      []entry
+	open     []Row
+	diskOpen bool
+	wits     []Witness
+}
+
+// verifyAll reads the anchor, witnesses and index from disk and walks.
+func verifyAll(dir string) (int, error) {
+	if err := checkLayout(dir); err != nil {
+		return 0, err
+	}
+	var s snap
+	var err error
+	if s.a, s.hasA, err = readHead(filepath.Join(dir, HeadName)); err != nil {
+		return 0, err
+	}
+	if s.wits, err = readWitnesses(dir); err != nil {
+		return 0, err
+	}
+	if s.seg, err = segDir(dir); err != nil {
+		return 0, err
+	}
+	if s.seg {
+		if s.idx, err = readIndex(dir); err != nil {
+			return 0, err
+		}
+		if _, err := os.Lstat(segPath(dir, len(s.idx)+2)); err == nil || !os.IsNotExist(err) {
+			return 0, codes.E(codes.AuditBad)
+		}
+	}
+	s.diskOpen = true
+	return walkAll(dir, s)
+}
+
+// walkAll walks every retained segment against the index, the anchor, the
 // prune record and every stored witness.
 //
 // Threats: a missing segment is pruning only when the newest audit.pruned
 // row covers it and names the index entry it ended at; otherwise it is
 // audit_truncated. A rewritten old segment no longer ends at its index entry
-// or no longer links, and is audit_bad.
-func verifyAll(dir string) (int, error) {
-	if err := checkLayout(dir); err != nil {
-		return 0, err
-	}
-	a, hasA, err := readHead(filepath.Join(dir, HeadName))
-	if err != nil {
-		return 0, err
-	}
-	wits, err := readWitnesses(dir)
-	if err != nil {
-		return 0, err
-	}
+// or no longer links, and is audit_bad. A stored witness the chain does not
+// hold is a WitnessError naming its seq.
+func walkAll(dir string, s snap) (int, error) {
 	want := map[int64]string{}
-	for _, w := range wits {
+	for _, w := range s.wits {
 		if h, ok := want[w.Seq]; ok && h != w.Hash {
-			return 0, codes.E(codes.AuditTruncated)
+			return 0, &WitnessError{Seq: w.Seq}
 		}
 		want[w.Seq] = w.Hash
 	}
-	ok, err := segDir(dir)
-	if err != nil {
-		return 0, err
-	}
-	if !ok {
-		if hasA || len(wits) > 0 {
+	if !s.seg {
+		if s.hasA {
 			return 0, codes.E(codes.AuditTruncated)
+		}
+		for _, w := range s.wits {
+			return 0, &WitnessError{Seq: w.Seq}
 		}
 		return 0, nil
 	}
-	idx, err := readIndex(dir)
-	if err != nil {
-		return 0, err
-	}
+	idx := s.idx
 	closed := len(idx)
-	if _, err := os.Lstat(segPath(dir, closed+2)); err == nil || !os.IsNotExist(err) {
-		return 0, codes.E(codes.AuditBad)
-	}
 	low, err := lowest(dir, closed)
 	if err != nil {
 		return 0, err
@@ -812,7 +866,7 @@ func verifyAll(dir string) (int, error) {
 			walked = row.Seq
 		}
 		if h, ok := want[row.Seq]; ok && h != row.Hash {
-			return codes.E(codes.AuditTruncated)
+			return &WitnessError{Seq: row.Seq}
 		}
 		if row.Action == "audit.pruned" && row.Actor == "secsvc" {
 			dec := json.NewDecoder(bytes.NewReader(row.Detail))
@@ -825,23 +879,37 @@ func verifyAll(dir string) (int, error) {
 		}
 		return nil
 	}
-	for n := low; n <= closed+1; n++ {
+	for n := low; n <= closed; n++ {
 		first, prev := link(idx[:n-1])
-		got, end, missing, err := walk(segPath(dir, n), first, prev, visit)
+		_, end, missing, err := walk(segPath(dir, n), first, prev, visit)
 		if err != nil {
 			return 0, err
 		}
-		if n <= closed {
-			e := idx[n-1]
-			if missing {
-				return 0, codes.E(codes.AuditTruncated)
+		e := idx[n-1]
+		if missing {
+			return 0, codes.E(codes.AuditTruncated)
+		}
+		if end.Seq != e.Last || end.Hash != e.Hash {
+			return 0, codes.E(codes.AuditBad)
+		}
+	}
+	if s.diskOpen {
+		first, prev := link(idx)
+		got, end, _, err := walk(segPath(dir, closed+1), first, prev, visit)
+		if err != nil {
+			return 0, err
+		}
+		if got > 0 {
+			openRows, last = true, end
+		}
+	} else {
+		for _, row := range s.open {
+			if err := visit(row, nil); err != nil {
+				return 0, err
 			}
-			if end.Seq != e.Last || end.Hash != e.Hash {
-				return 0, codes.E(codes.AuditBad)
-			}
-		} else if got > 0 {
-			openRows = true
-			last = end
+		}
+		if n := len(s.open); n > 0 {
+			openRows, last = true, s.open[n-1]
 		}
 	}
 	if low > 1 {
@@ -855,19 +923,19 @@ func verifyAll(dir string) (int, error) {
 		t.rows = []Row{last}
 	}
 	seq, hash := t.end()
-	if err := checkAnchor(a, hasA, seq, hash, last.Prev, openRows); err != nil {
+	if err := checkAnchor(s.a, s.hasA, seq, hash, last.Prev, openRows); err != nil {
 		return 0, err
 	}
-	for _, w := range wits {
+	for _, w := range s.wits {
 		if w.Seq > seq {
-			return 0, codes.E(codes.AuditTruncated)
+			return 0, &WitnessError{Seq: w.Seq}
 		}
 		if walked >= 0 && w.Seq >= walked {
 			continue
 		}
 		i := sort.Search(len(idx), func(i int) bool { return idx[i].Last >= w.Seq })
 		if i < len(idx) && idx[i].Last == w.Seq && idx[i].Hash != w.Hash {
-			return 0, codes.E(codes.AuditTruncated)
+			return 0, &WitnessError{Seq: w.Seq}
 		}
 	}
 	return count, nil

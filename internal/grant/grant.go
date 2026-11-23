@@ -36,13 +36,16 @@ const (
 	PurposeRead     = "security:read"
 	PurposeConfig   = "security:config"
 	PurposeOperate  = "security:operate"
-	EntAudit        = "security.audit"
-	EntBaseline     = "security.baseline"
-	EntConfig       = "security.config"
-	EntNotify       = "security.notify"
-	EntRead         = "security.read"
-	EntScan         = "security.scan"
-	EntWitness      = "security.witness"
+	// PurposeWitness is the off-host anchor's purpose. Only it carries
+	// security.witness, so no config or operate grant can post a witness.
+	PurposeWitness = "security:witness"
+	EntAudit       = "security.audit"
+	EntBaseline    = "security.baseline"
+	EntConfig      = "security.config"
+	EntNotify      = "security.notify"
+	EntRead        = "security.read"
+	EntScan        = "security.scan"
+	EntWitness     = "security.witness"
 )
 
 var (
@@ -90,9 +93,11 @@ func Ceiling(purpose string) []string {
 	case PurposeRead:
 		src = []string{EntAudit, EntRead}
 	case PurposeConfig:
-		src = []string{EntAudit, EntBaseline, EntConfig, EntNotify, EntRead, EntWitness}
+		src = []string{EntAudit, EntBaseline, EntConfig, EntNotify, EntRead}
 	case PurposeOperate:
-		src = []string{EntAudit, EntBaseline, EntConfig, EntNotify, EntRead, EntScan, EntWitness}
+		src = []string{EntAudit, EntBaseline, EntConfig, EntNotify, EntRead, EntScan}
+	case PurposeWitness:
+		src = []string{EntAudit, EntWitness}
 	default:
 		return nil
 	}
@@ -261,7 +266,7 @@ func shape(w wire) error {
 		return codes.E(codes.GrantBadShape)
 	}
 	switch w.Purpose {
-	case PurposeRead, PurposeConfig, PurposeOperate:
+	case PurposeRead, PurposeConfig, PurposeOperate, PurposeWitness:
 	default:
 		return codes.E(codes.GrantBadShape)
 	}

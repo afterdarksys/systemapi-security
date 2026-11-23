@@ -554,3 +554,34 @@ func holdStore(t *testing.T, dir string, open bool) func() {
 		}
 	}
 }
+
+// audit verify names the stored witness the chain no longer holds.
+func TestAuditVerifyNamesWitness(t *testing.T) {
+	out, errb := capture(t)
+	dir := t.TempDir()
+	c, err := audit.Open(dir, audit.Options{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(1_700_000_000, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	seq, hash, _, err := c.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.AddWitness(audit.Witness{Seq: seq, Hash: hash, Witness: "cp-1", Time: "2026-11-23T00:00:00Z"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, audit.WitnessName)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(string(raw), hash, strings.Repeat("f", 64), 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want(t, out, errb, []string{"audit", "verify", "--dir", dir}, 1, codes.AuditTruncated+"\nwitness seq 2\n")
+}

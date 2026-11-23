@@ -15,6 +15,7 @@ import (
 	"github.com/afterdarksys/systemapi-security/internal/codes"
 	"github.com/afterdarksys/systemapi-security/internal/engine"
 	"github.com/afterdarksys/systemapi-security/internal/grant"
+	"github.com/afterdarksys/systemapi-security/internal/store"
 )
 
 func TestVerifyRateLimited(t *testing.T) {
@@ -30,7 +31,22 @@ func TestVerifyRateLimited(t *testing.T) {
 	}
 	clock = clock.Add(59 * time.Second)
 	shell(t, call(f.srv, http.MethodGet, "/v1/audit/verify", read, ""), http.StatusTooManyRequests)
+	// The limit is per grant actor: another actor still gets its walk.
+	other := f.sign(t, grant.Grant{Actor: "cp-collector", Purpose: grant.PurposeRead, Entitlements: grant.Fill(grant.PurposeRead), LeaseID: "lease-read2"})
+	shell(t, call(f.srv, http.MethodGet, "/v1/audit/verify", other, ""), http.StatusOK)
+	shell(t, call(f.srv, http.MethodGet, "/v1/audit/verify", other, ""), http.StatusTooManyRequests)
 	clock = clock.Add(2 * time.Second)
+	shell(t, call(f.srv, http.MethodGet, "/v1/audit/verify", read, ""), http.StatusOK)
+	// One walk at a time: a caller arriving during a walk is refused at once.
+	clock = clock.Add(2 * time.Minute)
+	f.srv.verifyMu.Lock()
+	f.srv.verifying = true
+	f.srv.verifyMu.Unlock()
+	rec = call(f.srv, http.MethodGet, "/v1/audit/verify", read, "")
+	shell(t, rec, http.StatusTooManyRequests)
+	f.srv.verifyMu.Lock()
+	f.srv.verifying = false
+	f.srv.verifyMu.Unlock()
 	shell(t, call(f.srv, http.MethodGet, "/v1/audit/verify", read, ""), http.StatusOK)
 	// The tail is not rate-limited.
 	shell(t, call(f.srv, http.MethodGet, "/v1/audit", read, ""), http.StatusOK)
@@ -124,14 +140,21 @@ func TestWitnessRoute(t *testing.T) {
 	sh, _ := headOf(t, f, read)
 	body := `{"seq":` + itoa(sh.Head.Seq) + `,"hash":"` + sh.Head.Hash + `","witness":"cp-1","time":"2026-11-22T12:00:00Z"}`
 	wit := func(lease string) string {
-		return f.sign(t, grant.Grant{Purpose: grant.PurposeConfig, Entitlements: []string{grant.EntAudit, grant.EntWitness}, LeaseID: lease})
+		return f.sign(t, grant.Grant{Purpose: grant.PurposeWitness, Entitlements: grant.Fill(grant.PurposeWitness), LeaseID: lease})
 	}
 
-	// security:read does not carry the entitlement; config without it is forbidden.
-	noWit := f.sign(t, grant.Grant{Purpose: grant.PurposeConfig, Entitlements: []string{grant.EntAudit}, LeaseID: "lease-nowit1"})
-	rec := call(f.srv, http.MethodPost, "/v1/audit/witness", noWit, body)
+	// Only security:witness carries the entitlement: a default operate grant
+	// is forbidden, and an operate grant that names it is over its ceiling.
+	op := f.sign(t, grant.Grant{Purpose: grant.PurposeOperate, Entitlements: grant.Fill(grant.PurposeOperate), LeaseID: "lease-nowit1"})
+	rec := call(f.srv, http.MethodPost, "/v1/audit/witness", op, body)
 	shell(t, rec, http.StatusForbidden)
 	if errOf(t, rec) != codes.Forbidden {
+		t.Fatal(rec.Body.String())
+	}
+	over := f.sign(t, grant.Grant{Purpose: grant.PurposeOperate, Entitlements: []string{grant.EntWitness}, LeaseID: "lease-nowit2"})
+	rec = call(f.srv, http.MethodPost, "/v1/audit/witness", over, body)
+	shell(t, rec, http.StatusBadRequest)
+	if errOf(t, rec) != codes.GrantPurpose {
 		t.Fatal(rec.Body.String())
 	}
 	rec = call(f.srv, http.MethodPost, "/v1/audit/witness", read, body)
@@ -158,17 +181,35 @@ func TestWitnessRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A witness the chain does not hold is the evidence of a rewrite.
-	bad := strings.Replace(body, sh.Head.Hash, strings.Repeat("e", 64), 1)
-	rec = call(f.srv, http.MethodPost, "/v1/audit/witness", wit("lease-wit003"), bad)
-	shell(t, rec, http.StatusInternalServerError)
-	if errOf(t, rec) != codes.AuditTruncated {
-		t.Fatal(rec.Body.String())
+	// A witness the chain does not hold now is refused, not stored, and
+	// audited against the grant that sent it; the chain stays usable.
+	before, err := os.ReadFile(filepath.Join(f.dir, "witness.jsonl"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	rec = call(f.srv, http.MethodGet, "/v1/audit", read, "")
-	shell(t, rec, http.StatusInternalServerError)
-	if errOf(t, rec) != codes.AuditTruncated {
-		t.Fatal(rec.Body.String())
+	for i, bad := range []string{
+		strings.Replace(body, sh.Head.Hash, strings.Repeat("e", 64), 1),
+		strings.Replace(body, `"seq":`+itoa(sh.Head.Seq), `"seq":99`, 1),
+	} {
+		lease := "lease-wit10" + itoa(int64(i))
+		rec = call(f.srv, http.MethodPost, "/v1/audit/witness", wit(lease), bad)
+		shell(t, rec, http.StatusConflict)
+		if errOf(t, rec) != codes.WitnessMismatch {
+			t.Fatal(rec.Body.String())
+		}
+		rows, err := f.srv.Eng.Audit(1)
+		if err != nil || rows[0].Action != "audit.witness_refused" || rows[0].Actor != "ops" || rows[0].LeaseID != lease ||
+			!strings.Contains(string(rows[0].Detail), `"error":"witness_mismatch"`) {
+			t.Fatalf("%+v %v", rows, err)
+		}
+	}
+	after, err := os.ReadFile(filepath.Join(f.dir, "witness.jsonl"))
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("refused witness stored: %v", err)
+	}
+	shell(t, call(f.srv, http.MethodGet, "/v1/audit", read, ""), http.StatusOK)
+	if _, err := store.Open(f.dir, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 

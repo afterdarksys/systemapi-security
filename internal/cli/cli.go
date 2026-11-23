@@ -127,7 +127,7 @@ func cmdGrant(args []string) int {
 
 func grantShape(g *grant.Grant, ttl string, ents, watch []string) error {
 	switch g.Purpose {
-	case grant.PurposeRead, grant.PurposeConfig, grant.PurposeOperate:
+	case grant.PurposeRead, grant.PurposeConfig, grant.PurposeOperate, grant.PurposeWitness:
 	default:
 		return codes.E(codes.GrantBadShape)
 	}
@@ -345,7 +345,14 @@ func cmdAudit(args []string) int {
 		if code == codes.BadDir {
 			exit = 2
 		}
-		return fail(exit, code)
+		n := fail(exit, code)
+		// The first line stays the stable code; a stored witness the chain
+		// no longer holds is named on the second, for the operator.
+		var we *audit.WitnessError
+		if errors.As(err, &we) {
+			fmt.Fprintf(stderr, "witness seq %d\n", we.Seq)
+		}
+		return n
 	}
 	b, err := codes.Marshal(struct {
 		OK   bool `json:"ok"`

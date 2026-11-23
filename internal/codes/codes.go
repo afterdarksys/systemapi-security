@@ -46,6 +46,9 @@ const (
 	AuditLayout    = "audit_layout"
 	RateLimited    = "rate_limited"
 	QueueFull      = "queue_full"
+
+	WitnessMismatch     = "witness_mismatch"
+	WitnessUnverifiable = "witness_unverifiable"
 )
 
 // Error is a stable code. Error() returns only that code.

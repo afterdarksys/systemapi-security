@@ -87,12 +87,17 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 	if err != nil || len(id) != 32 || !LeaseOK(id) {
 		t.Fatalf("lease %q err %v", id, err)
 	}
-	if Ceiling(PurposeRead)[0] != EntAudit || Fill(PurposeOperate)[len(Fill(PurposeOperate))-1] != EntWitness {
+	if Ceiling(PurposeRead)[0] != EntAudit || Fill(PurposeOperate)[len(Fill(PurposeOperate))-1] != EntScan {
 		t.Fatalf("ceiling %v %v", Ceiling(PurposeRead), Fill(PurposeOperate))
 	}
-	// security.witness is a write: config and operate carry it, read does not.
-	if contains(Ceiling(PurposeRead), EntWitness) || !contains(Ceiling(PurposeConfig), EntWitness) || !contains(Ceiling(PurposeOperate), EntWitness) {
-		t.Fatalf("witness ceiling %v %v", Ceiling(PurposeRead), Ceiling(PurposeConfig))
+	// Only the witness purpose carries security.witness.
+	for _, p := range []string{PurposeRead, PurposeConfig, PurposeOperate} {
+		if contains(Ceiling(p), EntWitness) {
+			t.Fatalf("%s carries witness: %v", p, Ceiling(p))
+		}
+	}
+	if w := Ceiling(PurposeWitness); len(w) != 2 || w[0] != EntAudit || w[1] != EntWitness {
+		t.Fatalf("witness ceiling %v", w)
 	}
 	if !HostOK("localhost") || HostOK("Local") || !ActorOK("ops:ryan") || ActorOK("*") {
 		t.Fatal("grammar")

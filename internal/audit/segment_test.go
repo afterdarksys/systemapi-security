@@ -2,6 +2,7 @@ package audit
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -535,27 +536,50 @@ func TestWitness(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	refuted := func(t *testing.T, mut func(*Witness)) {
+	// A witness the chain does not hold now is refused and not stored, so
+	// a witness grant cannot make the store unopenable.
+	refused := func(t *testing.T, code string, mut func(*Witness)) {
 		d := t.TempDir()
 		c := openChain(t, d, small, 0)
 		appendN(t, c, 4)
 		w := witnessAt(t, c, 4)
 		mut(&w)
-		wantCode(t, c.AddWitness(w), codes.AuditTruncated, "add")
-		wantCode(t, c.Append("a", "lease-0001", "config.set", nil, time.Unix(1, 0)), codes.AuditBad, "broken after")
-		// Stored, so it keeps reporting after a restart.
-		_, err := c.ReadAll()
-		wantCode(t, err, codes.AuditTruncated, "runtime")
-		_, err = Open(d, small, 0)
-		wantCode(t, err, codes.AuditTruncated, "open")
-		_, err = VerifyDir(d)
-		wantCode(t, err, codes.AuditTruncated, "verify")
+		wantCode(t, c.AddWitness(w), code, "add")
+		if _, err := os.Lstat(filepath.Join(d, WitnessName)); !os.IsNotExist(err) {
+			t.Fatal("refused witness stored")
+		}
+		appendN(t, c, 1)
+		if _, err := c.ReadAll(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Open(d, small, 0); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Run("mismatch", func(t *testing.T) {
-		refuted(t, func(w *Witness) { w.Hash = strings.Repeat("b", 64) })
+		refused(t, codes.WitnessMismatch, func(w *Witness) { w.Hash = strings.Repeat("b", 64) })
 	})
 	t.Run("past_end", func(t *testing.T) {
-		refuted(t, func(w *Witness) { w.Seq = 99 })
+		refused(t, codes.WitnessMismatch, func(w *Witness) { w.Seq = 99 })
+	})
+	t.Run("pruned", func(t *testing.T) {
+		d := t.TempDir()
+		c := openChain(t, d, small, 1)
+		appendN(t, c, 12)
+		idx := readIdx(t, d)
+		if _, err := os.Stat(seg(d, 1)); !os.IsNotExist(err) {
+			t.Fatal("segment 1 not pruned")
+		}
+		// Seq 2 sits inside pruned segment 1: no hash can be checked.
+		wantCode(t, c.AddWitness(Witness{Seq: 2, Hash: strings.Repeat("d", 64), Witness: "cp-1", Time: "2026-11-23T00:00:00Z"}), codes.WitnessUnverifiable, "inside pruned")
+		// Its last row is recorded in the index: only that hash is accepted.
+		wantCode(t, c.AddWitness(Witness{Seq: 3, Hash: strings.Repeat("d", 64), Witness: "cp-1", Time: "2026-11-23T00:00:00Z"}), codes.WitnessMismatch, "pruned last, wrong hash")
+		if err := c.AddWitness(Witness{Seq: 3, Hash: idx[0].Hash, Witness: "cp-1", Time: "2026-11-23T00:00:00Z"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := VerifyDir(d); err != nil {
+			t.Fatal(err)
+		}
 	})
 	t.Run("chain_rolled_back", func(t *testing.T) {
 		d := t.TempDir()
@@ -585,7 +609,10 @@ func TestWitness(t *testing.T) {
 		_, err = Open(d, small, 0)
 		wantCode(t, err, codes.AuditTruncated, "open")
 		_, err = VerifyDir(d)
-		wantCode(t, err, codes.AuditTruncated, "verify")
+		var we *WitnessError
+		if !errors.As(err, &we) || we.Seq != 5 {
+			t.Fatalf("verify does not name the witness: %v", err)
+		}
 	})
 	t.Run("file_deleted_at_runtime", func(t *testing.T) {
 		d := t.TempDir()
@@ -621,6 +648,10 @@ func TestWitness(t *testing.T) {
 		}
 		_, err = VerifyDir(d)
 		wantCode(t, err, codes.AuditTruncated, "verify")
+		var we *WitnessError
+		if !errors.As(err, &we) || we.Seq != 2 {
+			t.Fatalf("verify does not name the witness: %v", err)
+		}
 	})
 }
 
@@ -631,7 +662,7 @@ func TestWitnessCompaction(t *testing.T) {
 	c := openChain(t, dir, Options{}, 0)
 	appendN(t, c, 1)
 	w := witnessAt(t, c, 1)
-	for i := 0; i < witnessLines+1; i++ {
+	for i := 0; i < witnessLines; i++ {
 		if err := c.AddWitness(w); err != nil {
 			t.Fatal(err)
 		}
@@ -651,14 +682,74 @@ func TestParseWitness(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, b := range map[string]string{
-		"extra":   strings.Replace(good, "{", `{"x":1,`, 1),
-		"seq":     strings.Replace(good, `"seq":1`, `"seq":0`, 1),
-		"upper":   strings.Replace(good, "aaaa", "AAAA", 1),
-		"witness": strings.Replace(good, "cp-1", "cp 1", 1),
-		"time":    strings.Replace(good, "2026-11-23T00:00:00Z", "yesterday", 1),
-		"two":     good + good,
+		"extra":     strings.Replace(good, "{", `{"x":1,`, 1),
+		"seq":       strings.Replace(good, `"seq":1`, `"seq":0`, 1),
+		"upper":     strings.Replace(good, "aaaa", "AAAA", 1),
+		"witness":   strings.Replace(good, "cp-1", "cp 1", 1),
+		"time":      strings.Replace(good, "2026-11-23T00:00:00Z", "yesterday", 1),
+		"long_time": strings.Replace(good, "2026-11-23T00:00:00Z", "2026-11-23T00:00:00.1234567890+00:00", 1),
+		"two":       good + good,
 	} {
 		_, err := ParseWitness([]byte(b))
 		wantCode(t, err, codes.BadPath, name)
+	}
+}
+
+// The reviewer's repro: 877 witnesses with the longest label and a 64-byte
+// time once passed the read cap and made the store unopenable (audit_bad).
+// With time capped at 35 the line count alone would still pass the cap near
+// 970 witnesses, so this adds one short of the line compaction.
+func TestWitnessGrowthKeepsStoreOpen(t *testing.T) {
+	dir := t.TempDir()
+	c := openChain(t, dir, Options{}, 0)
+	appendN(t, c, 1)
+	w := witnessAt(t, c, 1)
+	w.Witness = strings.Repeat("w", 128)
+	w.Time = "2026-11-23T00:00:00.123456789+00:00"
+	if len(w.Time) != 35 {
+		t.Fatal(len(w.Time))
+	}
+	for i := 0; i < witnessLines-1; i++ {
+		if err := c.AddWitness(w); err != nil {
+			t.Fatalf("witness %d: %v", i, err)
+		}
+	}
+	st, err := os.Stat(filepath.Join(dir, WitnessName))
+	if err != nil || st.Size() > int64(witnessCompact) {
+		t.Fatalf("witness file %v %v", st.Size(), err)
+	}
+	if _, err := Open(dir, Options{}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyDir(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The full walk runs without the chain lock: appends, rolls and a deferred
+// prune proceed while it walks, and the walk still verifies.
+func TestVerifyWithoutLock(t *testing.T) {
+	dir := t.TempDir()
+	c := openChain(t, dir, small, 2)
+	appendN(t, c, 30)
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; i < 20; i++ {
+			if _, err := c.Verify(); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	appendN(t, c, 60)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Verify(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyDir(dir); err != nil {
+		t.Fatal(err)
 	}
 }

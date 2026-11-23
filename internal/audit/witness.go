@@ -19,11 +19,15 @@ const (
 	witnessMax  = 256 << 10
 )
 
-// A file of witnessLines witnesses is compacted to the newest witnessKeep,
-// the new one included.
+// Before an append, a file that would reach witnessLines witnesses or pass
+// witnessCompact bytes is compacted to at most witnessKeep of the newest,
+// in at most half of witnessCompact bytes, the new one included. A witness
+// line is under 300 bytes, so the file stays well below witnessMax, the
+// read cap, and witness growth can never make the store unopenable.
 var (
-	witnessKeep  = 500
-	witnessLines = 1000
+	witnessKeep    = 500
+	witnessLines   = 1000
+	witnessCompact = 128 << 10
 )
 
 var witnessRe = regexp.MustCompile(`^[A-Za-z0-9:._@/-]{1,128}$`)
@@ -44,7 +48,7 @@ func ParseWitness(b []byte) (Witness, error) {
 	if err := dec.Decode(&w); err != nil || dec.More() {
 		return Witness{}, codes.E(codes.BadPath)
 	}
-	if w.Seq < 1 || !lowerHex(w.Hash) || !witnessRe.MatchString(w.Witness) || len(w.Time) > 64 {
+	if w.Seq < 1 || !lowerHex(w.Hash) || !witnessRe.MatchString(w.Witness) || len(w.Time) > 35 {
 		return Witness{}, codes.E(codes.BadPath)
 	}
 	if _, err := time.Parse(time.RFC3339, w.Time); err != nil {
@@ -134,19 +138,21 @@ func (c *Chain) checkWitness(w Witness, rows []Row) error {
 		return err
 	}
 	if h != "" && h != w.Hash {
-		return codes.E(codes.AuditTruncated)
+		return &WitnessError{Seq: w.Seq}
 	}
 	return nil
 }
 
-// AddWitness stores w, then checks that the chain holds it.
+// AddWitness stores w when the chain holds it now.
 //
-// Threats: a witness the chain does not match (a seq past the end, or a
-// different hash) is the off-host evidence of a truncation or rewrite. It is
-// stored anyway, so the runtime read, open and verify keep reporting
-// audit_truncated, across restarts, until an operator looks; the chain is
-// marked broken. The file keeps the newest witnesses only; the runtime read
-// checks the newest one.
+// Threats: only a witness of a row the chain holds, with the same hash, is
+// stored, so a witness grant cannot plant a record that makes the store
+// unopenable. A seq past the end or another hash is witness_mismatch; a row
+// in a pruned segment that is not that segment's last row cannot be
+// checked and is witness_unverifiable. Neither is stored or breaks the
+// chain; the caller audits the refusal. A stored witness that later stops
+// matching is tampering, and open, the runtime read and verify report
+// audit_truncated naming its seq. The runtime read checks the newest one.
 func (c *Chain) AddWitness(w Witness) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -158,6 +164,18 @@ func (c *Chain) AddWitness(w Witness) error {
 		c.broken = true
 		return err
 	}
+	h, err := c.hashAt(w.Seq, rows)
+	switch {
+	case codes.Code(err) == codes.AuditTruncated:
+		return codes.E(codes.WitnessMismatch)
+	case err != nil:
+		c.broken = true
+		return err
+	case h == "":
+		return codes.E(codes.WitnessUnverifiable)
+	case h != w.Hash:
+		return codes.E(codes.WitnessMismatch)
+	}
 	line, err := codes.Marshal(w)
 	if err != nil {
 		return codes.E(codes.Failed)
@@ -168,13 +186,22 @@ func (c *Chain) AddWitness(w Witness) error {
 		c.broken = true
 		return err
 	}
-	if len(ws) >= witnessLines {
+	size := 0
+	olds := make([][]byte, len(ws))
+	for i, old := range ws {
+		if olds[i], err = codes.Marshal(old); err != nil {
+			return codes.E(codes.Failed)
+		}
+		size += len(olds[i]) + 1
+	}
+	if len(ws)+1 >= witnessLines || size+len(line)+1 > witnessCompact {
+		keep, kept := 0, len(line)+1
+		for i := len(olds) - 1; i >= 0 && keep+1 < witnessKeep && kept+len(olds[i])+1 <= witnessCompact/2; i-- {
+			keep++
+			kept += len(olds[i]) + 1
+		}
 		var buf bytes.Buffer
-		for _, old := range ws[len(ws)-witnessKeep+1:] {
-			b, err := codes.Marshal(old)
-			if err != nil {
-				return codes.E(codes.Failed)
-			}
+		for _, b := range olds[len(olds)-keep:] {
 			buf.Write(append(b, '\n'))
 		}
 		buf.Write(append(line, '\n'))
@@ -187,9 +214,5 @@ func (c *Chain) AddWitness(w Witness) error {
 		return err
 	}
 	c.wit = &w
-	if err := c.checkWitness(w, rows); err != nil {
-		c.broken = true
-		return err
-	}
 	return nil
 }

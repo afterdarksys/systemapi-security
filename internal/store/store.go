@@ -486,10 +486,9 @@ func (s *Store) AuditCount() (int, error) {
 	return len(rows), nil
 }
 
-// AuditVerify walks every segment and returns the rows on disk.
+// AuditVerify walks every segment and returns the rows on disk. It does not
+// hold the store lock for the walk; the chain serializes with appends itself.
 func (s *Store) AuditVerify() (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	return s.chain.Verify()
 }
 
