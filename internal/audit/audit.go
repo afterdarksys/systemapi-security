@@ -4,16 +4,25 @@
 // verification. The chain does not store contact URLs, grant documents, or
 // keys. A symlink is not followed. A failed append marks the chain broken so
 // later appends fail closed. This is the host record; it is not cp_audit.
+//
+// Threats (truncation): a local anchor, audit.head, holds the last seq and
+// hash. It is written atomically after each append. A chain that ends before
+// the anchor's seq, whose row at that seq has another hash, or that is missing
+// while the anchor exists is audit_truncated. The anchor is read before the
+// chain so a concurrent append never looks like a truncation. Residual: root
+// can rewrite both files together; an off-host anchor is a later batch.
 package audit
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +34,7 @@ import (
 const (
 	MaxLine   = 64 << 10
 	MaxDetail = 8 << 10
+	headMax   = 1 << 10
 )
 
 // Genesis is the prev value of the first row: 64 zero hex chars.
@@ -66,10 +76,24 @@ type Chain struct {
 	broken bool
 }
 
-// Open verifies path and remembers the tail. A missing file is an empty chain.
-// A symlink or a broken chain is audit_bad.
+// anchor is the content of audit.head.
+type anchor struct {
+	Seq  int64  `json:"seq"`
+	Hash string `json:"hash"`
+}
+
+// HeadPath is the anchor file kept next to the chain: audit.jsonl -> audit.head.
+func HeadPath(path string) string {
+	return strings.TrimSuffix(path, ".jsonl") + ".head"
+}
+
+// Open verifies path and remembers the tail. A missing file with no anchor is
+// an empty chain. A symlink or a broken chain is audit_bad; a chain shorter
+// than its anchor is audit_truncated. A chain written before the anchor
+// existed gets one, plus an audit.anchor_init row naming the seq it starts at.
+// An anchor behind the chain (a crash between the two writes) is moved up.
 func Open(path string) (*Chain, error) {
-	rows, err := readAll(path)
+	rows, a, hasAnchor, err := load(path)
 	if err != nil {
 		return nil, err
 	}
@@ -83,16 +107,125 @@ func Open(path string) (*Chain, error) {
 		c.seq = rows[n-1].Seq
 		c.prev = rows[n-1].Hash
 	}
+	if c.seq == 0 {
+		return c, nil
+	}
+	if !hasAnchor {
+		detail, err := codes.Marshal(struct {
+			Seq int64 `json:"seq"`
+		}{c.seq})
+		if err != nil {
+			return nil, codes.E(codes.Failed)
+		}
+		if err := c.Append("secsvc", "", "audit.anchor_init", detail, time.Now()); err != nil {
+			return nil, err
+		}
+		return c, nil
+	}
+	if a.Seq != c.seq {
+		if err := writeHead(HeadPath(path), anchor{Seq: c.seq, Hash: c.prev}); err != nil {
+			return nil, err
+		}
+	}
 	return c, nil
 }
 
-// VerifyFile checks the chain and returns the row count. A missing file is empty.
+// VerifyFile checks the chain against its anchor and returns the row count.
+// A missing chain with no anchor is empty. It never writes.
 func VerifyFile(path string) (int, error) {
-	rows, err := readAll(path)
+	rows, _, _, err := load(path)
 	if err != nil {
 		return 0, err
 	}
 	return len(rows), nil
+}
+
+// load reads the anchor first, then the chain, so an append between the two
+// reads leaves the chain at or past the anchor.
+func load(path string) ([]Row, anchor, bool, error) {
+	a, ok, err := readHead(HeadPath(path))
+	if err != nil {
+		return nil, anchor{}, false, err
+	}
+	rows, err := readAll(path)
+	if err != nil {
+		return nil, anchor{}, false, err
+	}
+	if ok && (int64(len(rows)) < a.Seq || rows[a.Seq-1].Hash != a.Hash) {
+		return nil, anchor{}, false, codes.E(codes.AuditTruncated)
+	}
+	return rows, a, ok, nil
+}
+
+func readHead(path string) (anchor, bool, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return anchor{}, false, nil
+		}
+		return anchor{}, false, codes.E(codes.AuditBad)
+	}
+	if !fi.Mode().IsRegular() {
+		return anchor{}, false, codes.E(codes.AuditBad)
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return anchor{}, false, codes.E(codes.AuditBad)
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || !st.Mode().IsRegular() {
+		return anchor{}, false, codes.E(codes.AuditBad)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, headMax+1))
+	if err != nil || len(data) > headMax {
+		return anchor{}, false, codes.E(codes.AuditBad)
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var a anchor
+	if err := dec.Decode(&a); err != nil || dec.More() || a.Seq < 1 || !lowerHex(a.Hash) {
+		return anchor{}, false, codes.E(codes.AuditBad)
+	}
+	return a, true, nil
+}
+
+// writeHead replaces the anchor: temp file, fsync, rename, directory fsync.
+func writeHead(path string, a anchor) error {
+	b, err := codes.Marshal(a)
+	if err != nil {
+		return codes.E(codes.Failed)
+	}
+	var rnd [8]byte
+	if _, err := rand.Read(rnd[:]); err != nil {
+		return codes.E(codes.Failed)
+	}
+	dir := filepath.Dir(path)
+	tmp := filepath.Join(dir, ".head."+hex.EncodeToString(rnd[:]))
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		return codes.E(codes.Failed)
+	}
+	_, werr := f.Write(append(b, '\n'))
+	serr := f.Sync()
+	cerr := f.Close()
+	if werr != nil || serr != nil || cerr != nil {
+		os.Remove(tmp)
+		return codes.E(codes.Failed)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return codes.E(codes.Failed)
+	}
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return codes.E(codes.Failed)
+	}
+	serr = unix.Fsync(fd)
+	cerr = unix.Close(fd)
+	if serr != nil || cerr != nil {
+		return codes.E(codes.Failed)
+	}
+	return nil
 }
 
 // Append writes one row. detail nil becomes {}. The in-memory tail moves only
@@ -150,6 +283,10 @@ func (c *Chain) Append(actor, lease, action string, detail json.RawMessage, now 
 	}
 	c.seq = b.Seq
 	c.prev = hash
+	if err := writeHead(HeadPath(c.path), anchor{Seq: c.seq, Hash: c.prev}); err != nil {
+		c.broken = true
+		return err
+	}
 	return nil
 }
 
@@ -157,7 +294,7 @@ func (c *Chain) Append(actor, lease, action string, detail json.RawMessage, now 
 func (c *Chain) ReadAll() ([]Row, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	rows, err := readAll(c.path)
+	rows, _, _, err := load(c.path)
 	if err != nil {
 		c.broken = true
 		return nil, err

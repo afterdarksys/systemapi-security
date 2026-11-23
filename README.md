@@ -1,6 +1,6 @@
 # systemapi-security
 
-Local host security service for one Linux machine. The binary is `secsvc`. It listens on a Unix socket, checks `secsvc/1` Ed25519 grants, keeps an append-only audit chain, and runs a host IDS plus configurable distro security modules. High findings page through ntfy.sh.
+Local host security service for one Linux machine. The binary is `secsvc`. It listens on a Unix socket, checks `secsvc/1` Ed25519 grants, keeps an append-only audit chain with a local anchor (`audit.head`; root can still rewrite both files, and an off-host anchor is a later batch), and runs a host IDS plus configurable distro security modules. High findings page through ntfy.sh.
 
 **sah** means Service Automation Hub. This repository is its own module, `github.com/afterdarksys/systemapi-security`.
 

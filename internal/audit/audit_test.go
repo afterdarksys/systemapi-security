@@ -191,3 +191,184 @@ func upperHash(s string) string {
 	}
 	return s
 }
+
+func threeRows(t *testing.T, path string) []byte {
+	t.Helper()
+	c, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0).UTC()
+	for i := 0; i < 3; i++ {
+		if err := c.Append("a", "lease-0001", "config.set", nil, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+func TestAnchorDetectsTruncation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	raw := threeRows(t, path)
+	if _, err := os.Stat(filepath.Join(dir, "audit.head")); err != nil {
+		t.Fatalf("anchor not written: %v", err)
+	}
+	lines := strings.SplitAfter(string(raw), "\n")
+	// A valid chain of the same length, signed by nobody: only the anchor tells.
+	forged := filepath.Join(t.TempDir(), "audit.jsonl")
+	c, err := Open(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := c.Append("someone-else", "lease-0002", "config.set", nil, time.Unix(1, 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	forgedRaw, err := os.ReadFile(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := map[string]func() error{
+		"drop_last": func() error { return os.WriteFile(path, []byte(lines[0]+lines[1]), 0o600) },
+		"empty":     func() error { return os.WriteFile(path, nil, 0o600) },
+		"deleted":   func() error { return os.Remove(path) },
+		"rewritten": func() error { return os.WriteFile(path, forgedRaw, 0o600) },
+	}
+	for name, fn := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err := fn(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := VerifyFile(path); codes.Code(err) != codes.AuditTruncated {
+				t.Fatalf("verify: %v", err)
+			}
+			if _, err := Open(path); codes.Code(err) != codes.AuditTruncated {
+				t.Fatalf("open: %v", err)
+			}
+		})
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(lines[0]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c2.ReadAll(); codes.Code(err) != codes.AuditTruncated {
+		t.Fatalf("readall: %v", err)
+	}
+	if err := c2.Append("a", "lease-0001", "config.set", nil, time.Unix(1, 0)); codes.Code(err) != codes.AuditBad {
+		t.Fatalf("append after truncation: %v", err)
+	}
+}
+
+func TestAnchorFreshLegacyAndCrash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	head := filepath.Join(dir, "audit.head")
+	c, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(head); !os.IsNotExist(err) {
+		t.Fatalf("fresh store wrote an anchor: %v", err)
+	}
+	if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(head)
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("anchor %v %v", st, err)
+	}
+
+	// A chain from before the anchor existed gets one and an init row.
+	if err := os.Remove(head); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := VerifyFile(path); err != nil || n != 1 {
+		t.Fatalf("legacy verify %d %v", n, err)
+	}
+	c, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := c.ReadAll()
+	if err != nil || len(rows) != 2 || rows[1].Action != "audit.anchor_init" || string(rows[1].Detail) != `{"seq":1}` {
+		t.Fatalf("legacy %+v %v", rows, err)
+	}
+
+	// A crash between the row and the anchor leaves the anchor behind.
+	old, err := os.ReadFile(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(2, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(head, old, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := VerifyFile(path); err != nil || n != 3 {
+		t.Fatalf("behind %d %v", n, err)
+	}
+	c, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now, err := os.ReadFile(head)
+	if err != nil || !bytes.Contains(now, []byte(`"seq":3`)) {
+		t.Fatalf("anchor not moved up: %s %v", now, err)
+	}
+	if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(3, 0)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAnchorBadShape(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	threeRows(t, path)
+	head := filepath.Join(dir, "audit.head")
+	good, err := os.ReadFile(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"garbage": "nope",
+		"extra":   strings.Replace(string(good), "{", `{"x":1,`, 1),
+		"zero":    `{"seq":0,"hash":"` + Genesis + `"}`,
+		"upper":   `{"seq":1,"hash":"` + strings.Repeat("A", 64) + `"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(head, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := VerifyFile(path); codes.Code(err) != codes.AuditBad {
+				t.Fatalf("got %v", err)
+			}
+		})
+	}
+	if err := os.Remove(head); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(dir, "real.head")
+	if err := os.WriteFile(real, good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, head); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyFile(path); codes.Code(err) != codes.AuditBad {
+		t.Fatalf("symlink anchor: %v", err)
+	}
+}

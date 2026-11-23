@@ -36,6 +36,7 @@ const (
 	SendFailed     = "send_failed"
 	Usage          = "usage"
 	ReadyFailed    = "ready_failed"
+	AuditTruncated = "audit_truncated"
 )
 
 // Error is a stable code. Error() returns only that code.
