@@ -29,8 +29,8 @@ and control-plane audit ownership in systemapi; secsvc is a single-host service.
   system.modules with per-check coverage, and findings.
 - Findings carry id, kind, severity, subject, summary, observation,
   first_seen, last_seen. The ID is stable across recurrence; it is not an event ID.
-- `GET /v1/audit?limit=N` requires `security.audit`. It returns a tail (max 200),
-  not a durable event cursor. `findings.jsonl` is also capped, not a reliable
+- `GET /v1/audit?limit=N` requires `security.audit`. It returns a tail of the
+  newest audit segment (max 200), not a durable event cursor. `findings.jsonl` is also capped, not a reliable
   delivery queue. Do not pretend either is lossless export.
 - The legacy `caps` list in status remains advisory and is separate from the
   new module/check coverage. The report covers module state plus all open IDS
@@ -105,6 +105,46 @@ and control-plane audit ownership in systemapi; secsvc is a single-host service.
 - If adding configuration controls, send mutations through the existing agent
   command/grant workflow. Show a concrete diff, preserve full-replace fields,
   require appropriate permissions, and record the control-plane audit action.
+
+## Off-host anchor
+
+secsvc's side is done (hardening batch 2); the collector side is a systemapi.io
+batch and has not been started. Read `docs/architecture.md`, "Off-host anchor",
+for the exact contract. In short:
+
+- Each host has an anchor key, separate from the grant key. Its public key is
+  `anchor_pub` (hex) in `GET /v1/status`. Record it at enrollment through the
+  authenticated agent transport and pin it; do not take it from a head
+  response (heads do not carry it). A changed `anchor_pub` is a re-key event
+  for an operator, never a silent update.
+- `GET /v1/audit/head` (`security.audit`) returns
+  `{"head":{"host","seq","hash","segment","time"},"sig"}`. Verify `sig` as
+  Ed25519 over `secsvc-audit-head-v1\n` + the compact JSON of `head` in that
+  field order, with the pinned key. Store every verified head server-side,
+  keyed by tenant and enrolled machine, not by `head.host`.
+- Detection: a head whose `seq` is lower than a stored one, or whose `hash`
+  differs at a `seq` already seen, is a truncation or rewrite. Alert; do not
+  overwrite the stored head.
+- `POST /v1/audit/witness` (`security.witness`, which `security:read` lacks:
+  issue a `security:config` grant narrowed to `security.audit` and
+  `security.witness`; it spends its lease) takes
+  `{"seq","hash","witness","time"}` with `witness` an identifier of the
+  collecting party and `time` RFC 3339. Post back a head you stored earlier.
+  `200 {"ok":true}` means the chain still holds it. `audit_truncated` means it
+  does not: the host now reports `audit_truncated` until an operator acts, and
+  this is the event the dashboard must surface.
+- Cadence: one head fetch and at most one witness per collection interval is
+  enough; the host keeps the newest 500 witnesses. Do not call
+  `GET /v1/audit/verify` on a schedule: it walks every segment and is limited
+  to once a minute.
+- What it proves: the host signed what it said, when the collector saw it.
+  Root on the host holds the anchor key, so it can sign a rewritten chain
+  going forward; the protection is that the collector's stored heads and
+  witnesses are out of root's reach.
+- Tests the collector needs: valid head; bad signature; wrong pinned key;
+  seq regression; hash change at a known seq; witness accepted; witness
+  refused with `audit_truncated`; grant without `security.witness`; spent
+  lease; daemon offline.
 
 ## Local-core follow-ups before broad production claims
 

@@ -26,8 +26,10 @@ Domain string `secsvc-grant-v2\n`. The signed fields are `v`, `actor`, `host`, `
 | purpose | ceiling |
 | --- | --- |
 | `security:read` | `security.audit`, `security.read` |
-| `security:config` | those, plus `security.baseline`, `security.config`, `security.notify` |
+| `security:config` | those, plus `security.baseline`, `security.config`, `security.notify`, `security.witness` |
 | `security:operate` | those, plus `security.scan` |
+
+`security.witness` is a write (it can put the chain into `audit_truncated`), so `security:read` does not carry it. A witnessing party gets a `security:config` grant narrowed to `security.audit` and `security.witness`.
 
 `*` is `grant_star`. A watch of `/` is `grant_root_slash`. The daemon refuses a grant whose host differs from `--host` with `grant_host`. A second use of the same lease id is `grant_spent`. Spend is recorded before the commit and stays recorded when the commit fails. A blocked ntfy egress check returns before the lease is spent.
 
@@ -37,12 +39,14 @@ Global fields need coverage of what they govern, so a grant scoped to one path c
 
 ## HTTP
 
-Header `X-Secsvc-Grant`. One value. Body cap 64 KiB. Header cap 32 KiB. Read header timeout 5s, read and write timeouts 10s. Unknown paths return `404` `{"error":"bad_path"}` before the grant is read. A known path with the wrong method returns `405` before the grant is read. A grant that lacks the route entitlement is `403` `forbidden` before the body is parsed.
+Header `X-Secsvc-Grant`. One value. Body cap 64 KiB. Header cap 32 KiB. Read header timeout 5s, read and write timeouts 10s. The write timeout is a tested guarantee for scans: a scan answers once its findings are committed and pages afterwards (see IDS), so a slow ntfy never holds the response. Unknown paths return `404` `{"error":"bad_path"}` before the grant is read. A known path with the wrong method returns `405` before the grant is read. A grant that lacks the route entitlement is `403` `forbidden` before the body is parsed.
 
 | method | path | entitlement |
 | --- | --- | --- |
 | `GET` | `/v1/audit` | `security.audit` |
+| `GET` | `/v1/audit/head` | `security.audit` |
 | `GET` | `/v1/audit/verify` | `security.audit` |
+| `POST` | `/v1/audit/witness` | `security.witness` |
 | `POST` | `/v1/baseline` | `security.baseline` |
 | `GET` | `/v1/catalog` | `security.read` |
 | `GET` | `/v1/config` | `security.read` |
@@ -54,7 +58,9 @@ Header `X-Secsvc-Grant`. One value. Body cap 64 KiB. Header cap 32 KiB. Read hea
 | `POST` | `/v1/scan` | `security.scan` |
 | `GET` | `/v1/status` | `security.read` |
 
-`POST /v1/scan` and `POST /v1/baseline` require an empty body. Both spend the grant's lease, so a second scan on the same grant is `grant_spent`. The internal scan loop spends nothing. `PUT /v1/config` replaces the whole config. `{}` is a valid replace and clears `auth_log`, `watch`, and `listen_allow`. `GET /v1/audit` that fails chain verification returns `500` `audit_bad`. Audit JSON uses the API field names `seq`, `prev`, `time`, `actor`, `lease_id`, `action`, `detail`, `hash`.
+`POST /v1/scan` and `POST /v1/baseline` require an empty body. Both spend the grant's lease, so a second scan on the same grant is `grant_spent`. The internal scan loop spends nothing. `PUT /v1/config` replaces the whole config. `{}` is a valid replace and clears `auth_log`, `watch`, and `listen_allow`. `GET /v1/audit` that fails chain verification returns `500` `audit_bad`. `GET /v1/audit?limit=N` returns the last N rows of the newest segment only, so just after a segment rolls it returns fewer than N. `GET /v1/audit/verify` is the full walk of every segment and is limited to once a minute per daemon: a second call inside the minute is `429` `rate_limited`, before anything is read. `POST /v1/audit/witness` spends its lease. Audit JSON uses the API field names `seq`, `prev`, `time`, `actor`, `lease_id`, `action`, `detail`, `hash`.
+
+`GET /v1/status` also carries `anchor_pub`, the hex Ed25519 public key that signs audit heads (see Audit), and the config view carries `audit_keep_segments` and `page_detail`.
 
 ## Capabilities
 
@@ -82,13 +88,17 @@ Mode `0700`. Files are mode `0600`.
 
 | file | contents |
 | --- | --- |
-| `config.json` | `auth_log`, `auth_fail_limit`, `auth_window_s`, `watch`, `listen_allow`, `modules` |
+| `config.json` | `auth_log`, `auth_fail_limit`, `auth_window_s`, `watch`, `listen_allow`, `modules`, `audit_keep_segments`, `page_detail` |
 | `contact` | the ntfy contact string |
 | `baseline.json` | `{"v":2,"records":{...}}`: per watched path, SHA-256, size, full mode, uid, gid |
 | `ids-state.json` | auth position (path, inode, device, offset), open findings, coalesce times, last scan |
 | `spent.json` | lease id to expiry |
-| `audit.jsonl` | hash chain |
+| `audit/NNNNNN.jsonl` | hash chain segments, mode `0600` in a `0700` directory |
+| `audit/segments.json` | index of closed segments: first seq, last seq, last hash |
 | `audit.head` | anchor: last seq and hash of the chain |
+| `anchor.key` | Ed25519 seed that signs audit heads; created once with `O_EXCL`; never printed |
+| `witness.jsonl` | witness records posted by an off-host party, newest last, compacted at 1000 to the newest 500 |
+| `audit.jsonl.migrated` | the single-file chain after `secsvc audit migrate`, kept for the operator |
 | `lock` | POSIX record lock held by the daemon for its lifetime |
 | `findings.jsonl` | capped edge log, 500 lines or 1 MiB |
 
@@ -96,13 +106,31 @@ Mode `0700`. Files are mode `0600`.
 
 ## Audit
 
-Each row's hash is SHA-256 over the canonical JSON of `seq`, `prev`, `time`, `actor`, `lease_id`, `action`, and `detail`. The first `prev` is 64 zero hex digits. A rewritten, reordered, truncated, or extra-field line fails verification. A symlink is not followed. A failed append marks the chain broken so later appends fail closed. `secsvc audit verify --dir DIR` checks `audit.jsonl` with no grant. A missing chain with no anchor verifies as zero rows.
+Each row's hash is SHA-256 over the canonical JSON of `seq`, `prev`, `time`, `actor`, `lease_id`, `action`, and `detail`. The first `prev` is 64 zero hex digits. A rewritten, reordered, truncated, or extra-field line fails verification. A symlink is not followed. A failed append marks the chain broken so later appends fail closed. `secsvc audit verify --dir DIR` runs the full walk with no grant. A missing chain with no anchor verifies as zero rows.
 
-`audit.head` holds `seq` and `hash` of the last row. It is created with the first row, written atomically after each append (temp file, fsync, rename, directory fsync), and read before the chain. Open, verify, and every runtime re-read (status, `GET /v1/audit`) return `audit_truncated` when the chain ends before the anchor's seq, when the row at that seq has a different hash, when the chain is more than one row past the anchor, when the chain is missing or empty while the anchor exists, or when a non-empty chain has no anchor. An anchor exactly one row behind (a crash between the row and the anchor) is moved up on open. A running daemon also checks that the row it last wrote is still on disk with the same hash, so deleting the anchor and truncating the chain under it is `audit_truncated` too.
+**Segments.** Rows go to `audit/NNNNNN.jsonl`, numbered from `000001`. A segment holds at most 20,000 rows or 4 MiB; the row that would pass either cap goes to the next segment. The hash chain runs across segments: the first row of segment N has `prev` equal to the last hash of segment N-1. Closing a segment writes its entry to `audit/segments.json` (temp file, fsync, rename, directory fsync) before the next segment's first row, so a crash between them leaves a closed index and no next segment, which opens and continues. A segment past the one the index leaves open, or an index whose last entry does not link to the newest segment, is `audit_bad`.
+
+**Runtime reads.** Status, `GET /v1/audit`, `GET /v1/audit/head`, and appends read only `audit.head`, `audit/segments.json`, the newest segment (capped at 4 MiB), and `witness.jsonl`. The running daemon is the only writer, so the index must equal the one it holds in memory and the newest segment must end at the row it last wrote; otherwise `audit_truncated`. A runtime read does not open old segments, so it does not see a rewritten or deleted old segment.
+
+**Full verify.** `secsvc audit verify` and `GET /v1/audit/verify` walk every segment on disk, one line at a time with a buffer of one line (64 KiB), against the index: each closed segment must start at its entry's first seq, link to the previous entry's hash, and end at its own entry's last seq and hash; otherwise `audit_bad`. A missing segment is `audit_truncated` unless the newest `audit.pruned` row covers it (see Retention). This is the check that catches a rewritten old segment. It holds the engine lock for the walk, hence the once-a-minute limit through the API.
+
+**Retention.** `audit_keep_segments` in the config (default 0, keep all; at most 1,000,000) keeps that many closed segments. When a segment closes and more are kept than allowed, the daemon first appends `audit.pruned` with `from`, `through` (segment numbers), and the `last_seq` and `hash` of segment `through`, then deletes those files. The index keeps every entry, so the oldest retained segment stays linked. The full verify accepts missing segments only up to the newest `audit.pruned` row's `through`, and only when that row's `last_seq` and `hash` equal the index entry; a file a failed delete left behind still verifies, and the next roll retries the delete. Changing `audit_keep_segments` (or `page_detail`) needs a grant whose watch covers the state directory, otherwise `config_scope`, because it deletes audit history.
+
+**Layout and migration.** A state directory with `audit.jsonl` is the old single-file layout: open, the daemon, and verify refuse it with `audit_layout`. `secsvc audit migrate --dir DIR` holds the store lock (`store_busy` under a daemon), verifies the old file line by line against `audit.head` exactly as batch 1 did (a non-empty chain with no anchor is `audit_truncated`: run `secsvc audit anchor` first), writes the segments and index into a temporary directory, renames it to `audit/`, renames the old file to `audit.jsonl.migrated`, and appends `audit.migrated` with the `seq`, `hash`, and segment count. An existing `audit/` is `audit_layout`. A crash between the two renames leaves both, and open, verify, and migrate refuse with `audit_layout`: move `audit.jsonl` aside by hand, then run `secsvc audit verify` (that chain has no `audit.migrated` row). `secsvc audit anchor` works only on the single-file layout.
+
+`audit.head` holds `seq` and `hash` of the last row, wherever its segment. It is created with the first row, written atomically after each append (temp file, fsync, rename, directory fsync), and read before the chain. Open, verify, and every runtime re-read (status, `GET /v1/audit`) return `audit_truncated` when the chain ends before the anchor's seq, when the row at that seq has a different hash, when the chain is more than one row past the anchor, when the chain is missing or empty while the anchor exists, or when a non-empty chain has no anchor. An anchor exactly one row behind (a crash between the row and the anchor) is moved up on open. A running daemon also checks that the row it last wrote is still on disk with the same hash, so deleting the anchor and truncating the chain under it is `audit_truncated` too.
 
 A chain written before anchors existed is anchored once by the operator: `secsvc audit anchor --dir DIR` verifies the whole chain, writes the anchor, and appends `audit.anchor_init` with the `seq` and `hash` it anchored. It holds the store lock (`lock`, a POSIX record lock that `serve` takes for its lifetime), so it refuses with `store_busy` while a daemon owns the directory, and refuses with `anchor_exists` when an anchor is already there.
 
-**Residual:** the anchor is local. Root, or anyone who can write the state directory, can rewrite or delete both files together while the daemon is stopped, or run `secsvc audit anchor` after deleting the anchor. The anchor stops a truncation of the chain alone, not an attacker with the directory. An off-host anchor, kept by the agent, is a later batch.
+**Residual:** the anchor is local. Root, or anyone who can write the state directory, can rewrite or delete every file together while the daemon is stopped. The anchor stops a truncation of the chain alone, not an attacker with the directory. The off-host anchor below is what catches that, once the agent side exists.
+
+### Off-host anchor (secsvc side)
+
+`anchor.key` is an Ed25519 seed that `serve` creates in the state directory at the first start (`O_EXCL|O_NOFOLLOW`, mode `0600`, fsynced). It is never printed or returned; a group- or world-readable key is `seed_perms` at startup. Its public key is `anchor_pub` in `GET /v1/status`. It is a different key from the grant key.
+
+`GET /v1/audit/head` (`security.audit`) runs the runtime check, then returns `{"head":{"host","seq","hash","segment","time"},"sig"}`. `sig` is base64 Ed25519 over the bytes `secsvc-audit-head-v1\n` followed by the compact JSON of `head` in that field order. The domain line keeps a head signature from being valid as anything else. An empty chain has `seq` 0, the genesis hash, and `segment` 0. The response does not carry the public key: a verifier pins `anchor_pub` out of band, once.
+
+`POST /v1/audit/witness` (`security.witness`, spends the lease) takes a strict body `{"seq","hash","witness","time"}`: `seq` at least 1, `hash` 64 lowercase hex, `witness` matching `^[A-Za-z0-9:._@/-]{1,128}$`, `time` RFC 3339. Anything else is `bad_path`. secsvc appends it to `witness.jsonl` and audits `audit.witness`. It then checks that the chain still holds `seq` with `hash`. When it does not (a `seq` past the end, or another hash), the reply is `audit_truncated`, the chain is marked broken, and because the witness is stored, every later runtime read, open, and verify report `audit_truncated` too, across restarts, until an operator investigates. The runtime read checks the newest witness, and that it is the one the daemon last stored; the full verify checks every stored witness against the rows it walks (a witness inside a pruned segment is checked only when it is that segment's last row). Root can delete `witness.jsonl` with everything else; the protection is the copy the witnessing party keeps.
 
 ## IDS
 
@@ -114,9 +142,15 @@ Integrity `Lstat`s each watch path and does not follow a symlink. A symlink, a m
 
 Listeners decode `/proc/net/tcp` and `/proc/net/tcp6` only when `listen_allow` is non-empty. An address outside that list is `listen_unexpected` at `high`. A truncated table is `listen_truncated` at `medium`. A decode failure is `unsupported`, so a partial table is not treated as clean.
 
-Only severity `high` is paged. A `medium` finding is audited and marked paged immediately, so it does not page on a later scan. The same kind pages at most once per 60 seconds. With no contact file, paging is off and the finding is still marked paged.
+Only severity `high` is paged. A `medium` finding is audited and marked paged immediately, so it does not page on a later scan. The same kind pages at most once per 60 seconds (`page.coalesced`). With no contact file, paging is off and the finding is still marked paged.
 
-Page bodies differ from a bare ntfy title. Each body names the kind, the host, and a short subject, clipped at 200 bytes on a UTF-8 boundary:
+**Pages are sent after the scan commits.** A scan decides its pages, saves detector memory, and queues the pages on a bounded queue (64); the response returns then. A pager goroutine sends each page (5 s timeout) and audits `page.sent` or `page.failed` with the kind, the contact fingerprint, the page id, and the error code. A failed send, a full queue (`queue_full`), or a page still queued at shutdown unpages the finding, so the next scan pages it again. A bad contact at decision time is `page.failed` in the scan itself.
+
+**Pages carry no host detail.** The ntfy topic is public to anyone who learns or guesses it, so treat the contact as a secret and the page as public. By default a body is
+
+- `secsvc high KIND: N high finding(s) open, ref PAGEID`
+
+where `KIND` is the finding kind, `N` the number of open high findings after the scan, and `PAGEID` 16 random hex characters stored with the finding. It names no host, path, subject, summary, or address. `secsvc call findings` (and the report) shows `page_id` next to the local detail. `page_detail: true` in the config restores the old bodies, clipped at 200 bytes on a UTF-8 boundary, and puts that detail on the public topic:
 
 - `secsvc auth_fail on HOST: SUMMARY`
 - `secsvc integrity_changed on HOST: SUBJECT`

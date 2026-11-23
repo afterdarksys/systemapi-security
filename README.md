@@ -1,6 +1,6 @@
 # systemapi-security
 
-Local host security service for one Linux machine. The binary is `secsvc`. It listens on a Unix socket, checks `secsvc/2` Ed25519 grants, keeps an append-only audit chain with a local anchor (`audit.head`; root can still rewrite both files, and an off-host anchor is a later batch), and runs a host IDS plus configurable distro security modules. High findings page through ntfy.sh.
+Local host security service for one Linux machine. The binary is `secsvc`. It listens on a Unix socket, checks `secsvc/2` Ed25519 grants, keeps an append-only audit chain in capped segments with a local anchor (`audit.head`) and a signed head plus stored witnesses for an off-host anchor (root can still rewrite every local file; the agent side that collects heads is a later systemapi.io batch), and runs a host IDS plus configurable distro security modules. High findings page through ntfy.sh without host detail.
 
 **sah** means Service Automation Hub. This repository is its own module, `github.com/afterdarksys/systemapi-security`.
 
@@ -21,6 +21,16 @@ go build -o secsvc ./cmd/secsvc
 - A version-1 integrity baseline is not used. Every watched path reports unbaselined until you re-baseline with `secsvc call baseline` and a `security.baseline` grant.
 - `listen_allow` and the auth thresholds need grant coverage of what they govern (`config_scope` otherwise), and `POST /v1/scan` spends its lease.
 
+## Breaking changes (hardening batch 2)
+
+- The audit chain is segmented under `audit/`. A state directory with `audit.jsonl` is refused with `audit_layout`; with the daemon stopped, run `secsvc audit migrate --dir /var/lib/secsvc` (run `secsvc audit anchor` first if it reports `audit_truncated` on a chain from before `audit.head`).
+- `GET /v1/audit?limit=N` returns rows from the newest segment only; use `GET /v1/audit/verify` or `secsvc audit verify` for the whole chain.
+- `GET /v1/audit/verify` is rate-limited to once a minute (`429` `rate_limited`); poll the cheaper `GET /v1/status` instead.
+- Page bodies no longer name the host, a path, a subject, or an address; look a page's `ref` up in `secsvc call findings` (`page_id`), or set `page_detail: true` in the config to restore the old bodies.
+- Audit actions `notify.sent`, `notify.failed` and `notify.coalesced` are now `page.sent`, `page.failed` and `page.coalesced`; update anything that filters the audit by action.
+- `security:config` and `security:operate` grants now carry `security.witness` when issued with no `--entitlement` flags; pass explicit `--entitlement` flags to keep a grant without it.
+- `audit_keep_segments` and `page_detail` changes need a grant whose `--watch` covers the state directory (`config_scope` otherwise); issue the grant with `--watch /var/lib/secsvc`.
+
 ## Operator
 
 ```bash
@@ -32,7 +42,10 @@ secsvc serve --dir /var/lib/secsvc --pub /etc/secsvc/pub.hex \
 secsvc call status --socket /run/secsvc/sock --grant /tmp/grant.json
 secsvc audit verify --dir /var/lib/secsvc
 secsvc audit anchor --dir /var/lib/secsvc   # once, for a chain from before audit.head
+secsvc audit migrate --dir /var/lib/secsvc  # once, daemon stopped, for a single-file chain
 ```
+
+The ntfy topic in the contact is a bearer: anyone who learns or guesses it reads every page. Treat it as a secret. Pages carry only a kind, a count and a reference unless `page_detail` is on.
 
 `keygen` prints the public key as 64 hex characters and writes the seed with `O_EXCL` at mode `0600`. The seed is not printed. `grant` checks policy before it loads the seed or signs. A purpose with no `--entitlement` flags receives that purpose's full ceiling. `--ttl` is a whole number of seconds, at most `15m`.
 
