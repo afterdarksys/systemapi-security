@@ -13,7 +13,7 @@ Columns match the sash verb table. **key** is the `secsvc/2` entitlement. **muta
 | `security verify` | verb | `security.audit` | no | `GET /v1/audit/verify`. |
 | `security scan` | verb | `security.scan` | yes | `POST /v1/scan` with an empty body. |
 | `security baseline` | verb | `security.baseline` | yes | `POST /v1/baseline` with an empty body. |
-| `security config set` | verb | `security.config` | yes | `PUT /v1/config`, a full replace. Paths added or removed must sit under the grant `watch` list. |
+| `security config set` | verb | `security.config` | yes | `PUT /v1/config`, a full replace. Paths added or removed must sit under the grant `watch` list. `listen_allow` and the auth thresholds need coverage of what they govern (`config_scope` otherwise; see `docs/architecture.md`). |
 | `security contact` | verb | `security.notify` | yes | `PUT /v1/contact`. The contact file is mode `0600` and uses the `push:ntfy:https://ntfy.sh/<topic>` form. |
 
 `security catalog` is the same key as `security status` (`GET /v1/catalog`) and is optional in the first sash cut. `caps` on `security status` is a name, a state (`ok`, `degraded`, `absent`), and a closed reason. The list does not grant.
