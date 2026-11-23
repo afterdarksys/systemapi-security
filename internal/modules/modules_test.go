@@ -184,11 +184,11 @@ func TestAccountDetectionAndRedaction(t *testing.T) {
 func TestPermissionsAndKernel(t *testing.T) {
 	f := healthy("ubuntu")
 	f.meta["/etc/shadow"] = Metadata{Mode: 0640, UID: 0}
-	if found, err := filePermissions(f); err != nil || len(found) != 0 {
+	if found, err := filePermissions(f, mustProfile(t, "ubuntu")); err != nil || len(found) != 0 {
 		t.Fatalf("valid shadow group read: %+v %v", found, err)
 	}
 	f.meta["/etc/shadow"] = Metadata{Mode: 0666, UID: 1000}
-	found, err := filePermissions(f)
+	found, err := filePermissions(f, mustProfile(t, "ubuntu"))
 	if err != nil || len(found) != 2 {
 		t.Fatalf("%+v %v", found, err)
 	}
@@ -289,5 +289,52 @@ func TestStableRequiredPaths(t *testing.T) {
 	a, b := RequiredPaths(cfg), RequiredPaths(cfg)
 	if !reflect.DeepEqual(a, b) {
 		t.Fatal("unstable manifest")
+	}
+}
+
+func mustProfile(t *testing.T, id string) Profile {
+	t.Helper()
+	p, ok := profile(id)
+	if !ok {
+		t.Fatal(id)
+	}
+	return p
+}
+
+func TestShadowGroup(t *testing.T) {
+	groups := "root:x:0:\nshadow:x:42:\nusers:x:100:\n"
+	cases := []struct {
+		profile string
+		group   string
+		gid     uint32
+		finding bool
+		partial bool
+	}{
+		{"ubuntu", groups, 0, false, false},
+		{"debian", groups, 42, false, false},
+		{"alpine", groups, 42, false, false},
+		{"debian", groups, 100, true, false},
+		{"rocky", groups, 42, true, false},
+		{"arch", groups, 42, true, false},
+		{"debian", "root:x:0:\n", 42, true, false},
+		{"debian", "", 42, false, true},
+		{"debian", "shadow:x:nope:\n", 42, false, true},
+	}
+	for _, tc := range cases {
+		f := healthy(tc.profile)
+		f.meta["/etc/shadow"] = Metadata{Mode: 0640, UID: 0, GID: tc.gid}
+		if tc.group != "" {
+			f.files["/etc/group"] = tc.group
+		}
+		found, err := filePermissions(f, mustProfile(t, tc.profile))
+		groupFindings := 0
+		for _, x := range found {
+			if x.Kind == "group" && x.Subject == "/etc/shadow" {
+				groupFindings++
+			}
+		}
+		if (groupFindings == 1) != tc.finding || (err != nil) != tc.partial || len(found) != groupFindings {
+			t.Errorf("%s gid %d group %q: %+v %v", tc.profile, tc.gid, tc.group, found, err)
+		}
 	}
 }

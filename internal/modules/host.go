@@ -18,6 +18,7 @@ const ReadLimit = 1 << 20
 type Metadata struct {
 	Mode fs.FileMode
 	UID  uint32
+	GID  uint32
 }
 
 // Reader permits fixture tests without touching the running host. Implementations
@@ -91,7 +92,7 @@ func (HostFS) Metadata(p string) (Metadata, error) {
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return Metadata{}, errMalformed
 	}
-	return Metadata{Mode: fs.FileMode(st.Mode & 0777), UID: st.Uid}, nil
+	return Metadata{Mode: fs.FileMode(st.Mode & 0777), UID: st.Uid, GID: st.Gid}, nil
 }
 
 func fileReason(err error) string {

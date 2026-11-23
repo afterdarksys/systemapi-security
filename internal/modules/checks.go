@@ -34,6 +34,10 @@ type permissionRule struct {
 	forbidden uint32
 }
 
+// shadowGroups names the distro group that may own the shadow files.
+// Red Hat, Rocky, and Arch ship them root:root, so only root is allowed there.
+var shadowGroups = map[string]string{"alpine": "shadow", "debian": "shadow", "ubuntu": "shadow"}
+
 // Shadow group-read is intentional on Debian/Ubuntu; group-write never is.
 var permissions = []permissionRule{
 	{"/etc/passwd", 0022}, {"/etc/group", 0022},
@@ -77,7 +81,7 @@ func runCheck(f Reader, p Profile, id string) ([]ids.Finding, error) {
 	case "accounts":
 		return accounts(f)
 	case "permissions":
-		return filePermissions(f)
+		return filePermissions(f, p)
 	case "kernel":
 		return kernel(f)
 	case "ssh":
@@ -178,7 +182,12 @@ func accounts(f Reader) ([]ids.Finding, error) {
 	return found, incomplete
 }
 
-func filePermissions(f Reader) ([]ids.Finding, error) {
+// filePermissions checks owner, mode, and, for the shadow files, group.
+// Threats: shadow group-read is allowed, so the group is who can read the
+// password hashes. It must be root or the profile's shadow group as named in
+// /etc/group; any other group is a finding. An unresolvable shadow group is
+// incomplete coverage, not a pass.
+func filePermissions(f Reader, p Profile) ([]ids.Finding, error) {
 	var found []ids.Finding
 	var incomplete error
 	for _, r := range permissions {
@@ -193,8 +202,42 @@ func filePermissions(f Reader) ([]ids.Finding, error) {
 		if uint32(m.Mode.Perm())&r.forbidden != 0 {
 			found = append(found, finding("mode", ids.SevHigh, r.path, "Sensitive configuration has excessive write or disclosure permissions"))
 		}
+		if (r.path == "/etc/shadow" || r.path == "/etc/gshadow") && m.GID != 0 {
+			ok, err := isShadowGroup(f, p, m.GID)
+			if err != nil {
+				incomplete = err
+				continue
+			}
+			if !ok {
+				found = append(found, finding("group", ids.SevHigh, r.path, "Shadow file is not group-owned by root or the shadow group"))
+			}
+		}
 	}
 	return found, incomplete
+}
+
+// isShadowGroup reports whether gid is the profile's shadow group in /etc/group.
+func isShadowGroup(f Reader, p Profile, gid uint32) (bool, error) {
+	name, ok := shadowGroups[p.ID]
+	if !ok {
+		return false, nil
+	}
+	b, err := f.ReadFile("/etc/group")
+	if err != nil {
+		return false, err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) < 3 || fields[0] != name {
+			continue
+		}
+		n, err := strconv.ParseUint(fields[2], 10, 32)
+		if err != nil {
+			return false, errMalformed
+		}
+		return uint32(n) == gid, nil
+	}
+	return false, nil
 }
 
 func kernel(f Reader) ([]ids.Finding, error) {
