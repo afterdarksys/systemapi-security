@@ -520,3 +520,28 @@ func TestRefusesV1(t *testing.T) {
 	_, err = Verify(mustSign(t, seed, g), pub, "localhost", now)
 	wantCode(t, err, codes.GrantBadShape)
 }
+
+// A v2-shaped grant signed over the v1 domain string is not valid.
+func TestDomainIsV2(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	seed, pub := testKey(t)
+	g := goodGrant(now)
+	body := signed{V: g.V, Actor: g.Actor, Host: g.Host, Purpose: g.Purpose, Iat: g.Iat, Exp: g.Exp,
+		LeaseID: g.LeaseID, Entitlements: norm(g.Entitlements), Watch: norm(g.Watch)}
+	raw, err := codes.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, domain := range []string{"secsvc-grant-v1\n", ""} {
+		sig := ed25519.Sign(ed25519.NewKeyFromSeed(seed), append([]byte(domain), raw...))
+		doc, err := codes.Marshal(wire{signed: body, Sig: base64.StdEncoding.EncodeToString(sig)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = Verify(string(doc), pub, "localhost", now)
+		wantCode(t, err, codes.GrantBadSig)
+	}
+	if Domain != "secsvc-grant-v2\n" {
+		t.Fatalf("domain %q", Domain)
+	}
+}
