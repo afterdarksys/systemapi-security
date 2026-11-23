@@ -753,3 +753,30 @@ func TestVerifyWithoutLock(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A prune that lands while a full walk runs leaves its files for the next
+// roll, so the walk does not see its own snapshot's segments vanish.
+func TestPruneDeferredDuringWalk(t *testing.T) {
+	dir := t.TempDir()
+	c := openChain(t, dir, small, 1)
+	appendN(t, c, 9)
+	oldest := seg(dir, c.low)
+	t.Cleanup(func() { walkHook = nil })
+	walkHook = func() {
+		walkHook = nil
+		appendN(t, c, 7) // rolls, and each roll prunes
+	}
+	if _, err := c.Verify(); err != nil {
+		t.Fatalf("walk during prune: %v", err)
+	}
+	if _, err := os.Stat(oldest); err != nil {
+		t.Fatal("deleted during the walk")
+	}
+	appendN(t, c, 6) // the next roll deletes what was deferred
+	if _, err := os.Stat(oldest); !os.IsNotExist(err) {
+		t.Fatal("deferred delete never ran")
+	}
+	if _, err := c.Verify(); err != nil {
+		t.Fatal(err)
+	}
+}

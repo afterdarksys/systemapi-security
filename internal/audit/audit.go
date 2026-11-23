@@ -736,6 +736,9 @@ func (c *Chain) Verify() (int, error) {
 	}
 	c.walking++
 	c.mu.Unlock()
+	if walkHook != nil {
+		walkHook()
+	}
 	n, err := walkAll(c.dir, s)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -746,6 +749,9 @@ func (c *Chain) Verify() (int, error) {
 	}
 	return n, nil
 }
+
+// walkHook is a test hook run after Verify releases the chain lock.
+var walkHook func()
 
 // WitnessError is audit_truncated caused by a stored witness. Seq names the
 // witness, so an operator knows which off-host record disagrees.
