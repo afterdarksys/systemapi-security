@@ -21,7 +21,7 @@ func TestProbeFreshAndClosed(t *testing.T) {
 		prev = r.Name
 		switch r.Name {
 		case "grant_v1":
-			if r.State != StateOK || r.Reason != "" {
+			if r.State != StateAbsent || r.Reason != ReasonNoKey {
 				t.Fatalf("%+v", r)
 			}
 		case "audit":
@@ -46,6 +46,7 @@ func TestProbeMapsSentinels(t *testing.T) {
 		Integrity: func() error { return ErrUnreadable },
 		Listen:    func() error { return ErrUnsupported },
 		Notify:    func() error { return ErrContact },
+		Grant:     func() error { return nil },
 	}
 	by := index(t, Probe(env))
 	want(t, by["audit"], StateDegraded, ReasonAuditBad)
@@ -62,6 +63,12 @@ func TestProbeMapsSentinels(t *testing.T) {
 	env.Auth = func() error { return nil }
 	by = index(t, Probe(env))
 	want(t, by["auth"], StateOK, "")
+
+	env.Integrity = func() error { return ErrUnbaselined }
+	env.Grant = nil
+	by = index(t, Probe(env))
+	want(t, by["integrity"], StateDegraded, ReasonUnbaselined)
+	want(t, by["grant_v1"], StateAbsent, ReasonNoKey)
 }
 
 func TestProbeDropsHostText(t *testing.T) {

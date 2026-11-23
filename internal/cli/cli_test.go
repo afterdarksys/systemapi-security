@@ -285,7 +285,7 @@ func TestCallAgainstServe(t *testing.T) {
 
 	out.Reset()
 	errb.Reset()
-	if c := Main([]string{"call", "status", "--socket", sock, "--grant", grantPath}); c != 0 || errb.Len() != 0 || !bytes.Contains(out.Bytes(), []byte(`"host":"host1"`)) {
+	if c := Main([]string{"call", "status", "--socket", sock, "--grant", grantPath}); c != 0 || errb.Len() != 0 || !bytes.Contains(out.Bytes(), []byte(`"host":"host1"`)) || !bytes.Contains(out.Bytes(), []byte(`{"name":"grant_v1","state":"ok","reason":""}`)) {
 		t.Fatalf("%d %q %q", c, errb.String(), out.String())
 	}
 	empty := filepath.Join(dir, "empty-grant")

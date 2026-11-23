@@ -63,14 +63,16 @@ Header `X-Secsvc-Grant`. One value. Body cap 64 KiB. Header cap 32 KiB. Read hea
 | reason | when |
 | --- | --- |
 | `flag_off` | the detector is not configured |
-| `target_missing` | every configured target is absent |
+| `target_missing` | the auth log is absent, or any watched path is absent |
+| `unbaselined` | a watched path has no baseline record |
+| `no_key` | `grant_v1`: no grant public key is loaded |
 | `unreadable` | a target is not a readable regular file, or the listener table is oversized |
 | `unsupported_os` | this host has no listener table |
 | `audit_bad` | the hash chain does not verify |
 | `bad_contact` | a stored contact does not parse |
 | `probe_error` | any other probe failure |
 
-`grant_v1` is a property of this binary and is `ok` on every report. A probe is read-only. It does not follow a symlink and it does not read file contents. The report carries no path, contact, listener address, or error string. A result does not grant: `GET /v1/status` still requires `security.read`, and a degraded capability leaves every other route on its own entitlement. `GET /v1/catalog` remains the route and entitlement list.
+`grant_v1` is `ok` only when the daemon holds a loaded public key, and `absent` with `no_key` otherwise (the name is kept for the registry; the format it verifies is now `secsvc/2`). `integrity` is `ok` only when every watched path is a readable regular file with a baseline record; otherwise it is `degraded` with `unreadable`, then `target_missing`, then `unbaselined`, the worst first. Status never claims coverage it lacks. A probe is read-only. It does not follow a symlink and it does not read file contents. The report carries no path, contact, listener address, or error string. A result does not grant: `GET /v1/status` still requires `security.read`, and a degraded capability leaves every other route on its own entitlement. `GET /v1/catalog` remains the route and entitlement list.
 
 The Unix client sets `Transport.Proxy` to `notify.NoProxy`, a function that returns no proxy. Go treats a nil `Proxy` as `ProxyFromEnvironment`, which would honor `HTTPS_PROXY` and could observe the request. The client does not clone `http.DefaultTransport`.
 

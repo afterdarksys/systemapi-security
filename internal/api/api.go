@@ -533,7 +533,7 @@ func Serve(ctx context.Context, opt Options) error {
 	}
 	note("ready")
 	eng := &engine.Engine{
-		Store: st, Host: opt.Host, Now: opt.Now,
+		Store: st, Host: opt.Host, Now: opt.Now, Pub: pub,
 		Sender: &notify.Sender{Log: logCode}, Log: logCode,
 	}
 	srv := &http.Server{

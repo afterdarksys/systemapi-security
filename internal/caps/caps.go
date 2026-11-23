@@ -6,7 +6,9 @@
 // and a reason from a closed set. ok has an empty reason. Anything else is
 // rewritten to probe_error or dropped. A result is advisory: it detects
 // breakage, not compromise, and it never grants. Leases still decide every
-// mutating call.
+// mutating call. Status never claims coverage it lacks: integrity is ok only
+// when every watched path exists and is baselined, and grant_v1 is ok only
+// when a public key is loaded.
 package caps
 
 import (
@@ -27,13 +29,17 @@ const (
 	ReasonUnsupportedOS = "unsupported_os"
 	ReasonBadContact    = "bad_contact"
 	ReasonProbeError    = "probe_error"
+	ReasonUnbaselined   = "unbaselined"
+	ReasonNoKey         = "no_key"
 
 	// maxTokens matches the systemapi capability header bound.
 	maxTokens = 16
 )
 
 // ErrOff means the detector is not configured.
-// ErrMissing means every configured target is absent.
+// ErrMissing means a configured target is absent.
+// ErrUnbaselined means a watched path has no baseline record.
+// ErrNoKey means no grant public key is loaded.
 // ErrUnreadable means a target cannot be read as a regular file.
 // ErrUnsupported means this host has no such probe surface.
 // ErrAudit means the hash chain does not verify.
@@ -47,6 +53,8 @@ var (
 	ErrAudit       = errors.New("audit")
 	ErrContact     = errors.New("contact")
 	ErrProbe       = errors.New("probe")
+	ErrUnbaselined = errors.New("unbaselined")
+	ErrNoKey       = errors.New("no_key")
 )
 
 // Check is one probe. A nil Check means the detector is off.
@@ -56,6 +64,7 @@ type Check func() error
 // sentinel. Their error text is discarded.
 type Env struct {
 	Audit     Check
+	Grant     Check
 	Auth      Check
 	Integrity Check
 	Listen    Check
@@ -79,12 +88,14 @@ var reasons = map[string]struct{}{
 	ReasonUnsupportedOS: {},
 	ReasonBadContact:    {},
 	ReasonProbeError:    {},
+	ReasonUnbaselined:   {},
+	ReasonNoKey:         {},
 }
 
 var registry = map[string]func(Env) Result{
 	"audit":     probeAudit,
 	"auth":      func(e Env) Result { return fromCheck("auth", e.Auth) },
-	"grant_v1":  func(Env) Result { return ok("grant_v1") },
+	"grant_v1":  probeGrant,
 	"integrity": func(e Env) Result { return fromCheck("integrity", e.Integrity) },
 	"listen":    func(e Env) Result { return fromCheck("listen", e.Listen) },
 	"notify":    func(e Env) Result { return fromCheck("notify", e.Notify) },
@@ -107,6 +118,15 @@ func probeAudit(e Env) Result {
 		return degraded("audit", ReasonProbeError)
 	}
 	return mapErr("audit", e.Audit())
+}
+
+// probeGrant reports whether the daemon holds a key to verify grants with.
+// A nil check means none is loaded.
+func probeGrant(e Env) Result {
+	if e.Grant == nil {
+		return absent("grant_v1", ReasonNoKey)
+	}
+	return mapErr("grant_v1", e.Grant())
 }
 
 func fromCheck(name string, c Check) Result {
@@ -132,6 +152,10 @@ func mapErr(name string, err error) Result {
 		return degraded(name, ReasonAuditBad)
 	case errors.Is(err, ErrContact):
 		return degraded(name, ReasonBadContact)
+	case errors.Is(err, ErrUnbaselined):
+		return degraded(name, ReasonUnbaselined)
+	case errors.Is(err, ErrNoKey):
+		return absent(name, ReasonNoKey)
 	default:
 		return degraded(name, ReasonProbeError)
 	}

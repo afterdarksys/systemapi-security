@@ -11,6 +11,7 @@ package engine
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"io"
@@ -59,6 +60,8 @@ type Armed struct {
 
 // Engine is the host scanner. Scan and the API share mu.
 type Engine struct {
+	// Pub is the grant verification key, reported by the grant_v1 cap only.
+	Pub      ed25519.PublicKey
 	SystemFS modules.Reader
 	mu       sync.Mutex
 	Store    *store.Store
@@ -131,7 +134,8 @@ func (e *Engine) capEnv(cfg store.Config) caps.Env {
 	return caps.Env{
 		Audit:     e.auditCheck,
 		Auth:      fileCheck(cfg.AuthLog),
-		Integrity: watchCheck(cfg.Watch),
+		Integrity: watchCheck(cfg.Watch, e.Store.Baseline()),
+		Grant:     e.grantCheck(),
 		Listen:    e.listenCheck(cfg.ListenAllow),
 		Notify:    e.notifyCheck,
 	}
@@ -146,6 +150,13 @@ func (e *Engine) auditCheck() error {
 		return caps.ErrAudit
 	}
 	return caps.ErrProbe
+}
+
+func (e *Engine) grantCheck() caps.Check {
+	if len(e.Pub) != ed25519.PublicKeySize {
+		return nil
+	}
+	return func() error { return nil }
 }
 
 func (e *Engine) notifyCheck() error {
@@ -193,26 +204,34 @@ func fileCheck(path string) caps.Check {
 	return func() error { return classFile(path) }
 }
 
-func watchCheck(paths []string) caps.Check {
+// watchCheck is ok only when every watched path is a readable regular file
+// with a baseline record. Otherwise the worst reason wins: unreadable, then
+// target_missing, then unbaselined.
+func watchCheck(paths []string, base map[string]ids.Record) caps.Check {
 	if len(paths) == 0 {
 		return nil
 	}
 	cp := append([]string(nil), paths...)
 	return func() error {
-		missing := 0
+		missing, unbaselined := false, false
 		for _, p := range cp {
 			err := classFile(p)
-			if err == nil {
+			switch {
+			case errors.Is(err, caps.ErrMissing):
+				missing = true
 				continue
+			case err != nil:
+				return caps.ErrUnreadable
 			}
-			if errors.Is(err, caps.ErrMissing) {
-				missing++
-				continue
+			if _, ok := base[p]; !ok {
+				unbaselined = true
 			}
-			return caps.ErrUnreadable
 		}
-		if missing == len(cp) {
+		if missing {
 			return caps.ErrMissing
+		}
+		if unbaselined {
+			return caps.ErrUnbaselined
 		}
 		return nil
 	}

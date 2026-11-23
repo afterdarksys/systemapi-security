@@ -457,6 +457,14 @@ func TestCapabilityReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if c := capBy(st, "grant_v1"); c.State != caps.StateAbsent || c.Reason != caps.ReasonNoKey {
+		t.Fatalf("grant_v1 without a key %+v", c)
+	}
+	e.Pub = make([]byte, 32)
+	st, err = e.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if capBy(st, "grant_v1").State != caps.StateOK || capBy(st, "audit").State != caps.StateOK {
 		t.Fatalf("%+v", st.Caps)
 	}
@@ -509,13 +517,31 @@ func TestCapabilityReport(t *testing.T) {
 	missing := filepath.Join(dir, "no-such-watch")
 	good := filepath.Join(dir, "watched")
 	writeFile(t, good, "a\n")
-	putJSON(t, e, "lease-cap2", map[string]any{"watch": []string{good, missing}}, coverAll)
+	putJSON(t, e, "lease-cap2", map[string]any{"watch": []string{good}}, coverAll)
+	st, err = e.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := capBy(st, "integrity"); c.State != caps.StateDegraded || c.Reason != caps.ReasonUnbaselined {
+		t.Fatalf("unbaselined %+v", c)
+	}
+	if err := e.Baseline("actor", "lease-capb", expAt(), coverAll); err != nil {
+		t.Fatal(err)
+	}
 	st, err = e.Status()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if capBy(st, "integrity").State != caps.StateOK || capBy(st, "auth").State != caps.StateAbsent {
 		t.Fatalf("%+v", st.Caps)
+	}
+	putJSON(t, e, "lease-cap2b", map[string]any{"watch": []string{good, missing}}, coverAll)
+	st, err = e.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := capBy(st, "integrity"); c.State != caps.StateDegraded || c.Reason != caps.ReasonTargetMissing {
+		t.Fatalf("one missing %+v", c)
 	}
 	assertNo(t, st, good, missing)
 
