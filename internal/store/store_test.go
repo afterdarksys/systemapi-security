@@ -10,6 +10,7 @@ import (
 
 	"github.com/afterdarksys/systemapi-security/internal/codes"
 	"github.com/afterdarksys/systemapi-security/internal/ids"
+	"golang.org/x/sys/unix"
 )
 
 func TestOpenDefaults(t *testing.T) {
@@ -422,5 +423,25 @@ func TestBaselineVersions(t *testing.T) {
 				t.Fatal("opened")
 			}
 		})
+	}
+}
+
+func TestStateReadDoesNotBlockOnFIFO(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "config.json")
+	if err := unix.Mkfifo(fifo, 0o600); err != nil {
+		t.Skip("mkfifo:", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := readUpTo(fifo, fileMax)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if codes.Code(err) != codes.NotRegular {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("blocked on a FIFO")
 	}
 }

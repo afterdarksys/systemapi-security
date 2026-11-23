@@ -935,11 +935,20 @@ func readState(path string, max int64) ([]byte, error) {
 	return b, nil
 }
 
+// readUpTo reads at most max bytes of a regular file. The open is
+// O_NONBLOCK|O_NOFOLLOW and fstat must say regular, so a FIFO swapped in
+// after the caller's Lstat fails instead of blocking the daemon.
 func readUpTo(path string, max int64) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, err
 	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG {
+		unix.Close(fd)
+		return nil, codes.E(codes.NotRegular)
+	}
+	f := os.NewFile(uintptr(fd), path)
 	defer f.Close()
 	return io.ReadAll(io.LimitReader(f, max))
 }
