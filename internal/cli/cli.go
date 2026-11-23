@@ -219,7 +219,7 @@ func cmdServe(args []string) int {
 	if err := fs.Parse(args); err != nil || fs.NArg() != 0 {
 		return fail(2, codes.Usage)
 	}
-	if *dir == "" || *pub == "" || *host == "" || *socket == "" {
+	if *dir == "" || *pub == "" || *socket == "" {
 		return fail(2, codes.Usage)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

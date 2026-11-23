@@ -499,6 +499,11 @@ func Serve(ctx context.Context, opt Options) error {
 	if opt.Interval < MinInterval {
 		return codes.E(codes.Usage)
 	}
+	// Threats: a placeholder host would make every grant for that name valid
+	// on every host that ships the same template. Refuse it before any state.
+	if opt.Host == "" || opt.Host == "localhost" {
+		return codes.E(codes.HostUnset)
+	}
 	if !grant.HostOK(opt.Host) {
 		return codes.E(codes.BadHost)
 	}

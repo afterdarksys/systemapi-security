@@ -51,12 +51,12 @@ func newFix(t *testing.T) *fix {
 		t.Fatal(err)
 	}
 	eng := &engine.Engine{
-		Store: st, Host: "localhost", Now: func() time.Time { return now },
+		Store: st, Host: "host1", Now: func() time.Time { return now },
 		Sender: &notify.Sender{},
 	}
 	return &fix{
 		dir: dir, seed: seed, now: now,
-		srv: &Server{Host: "localhost", Pub: pub, Eng: eng, Now: func() time.Time { return now }},
+		srv: &Server{Host: "host1", Pub: pub, Eng: eng, Now: func() time.Time { return now }},
 	}
 }
 
@@ -69,7 +69,7 @@ func (f *fix) sign(t *testing.T, g grant.Grant) string {
 		g.Actor = "ops"
 	}
 	if g.Host == "" {
-		g.Host = "localhost"
+		g.Host = "host1"
 	}
 	if g.Exp == 0 {
 		g.Exp = f.now.Unix() + 600
@@ -186,7 +186,7 @@ func TestRoutingAndGrant(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
 		t.Fatal(err)
 	}
-	if st.Host != "localhost" || st.Listen != "off" || st.OpenFindings != 0 || st.Armed.Auth || st.Armed.Listen {
+	if st.Host != "host1" || st.Listen != "off" || st.OpenFindings != 0 || st.Armed.Auth || st.Armed.Listen {
 		t.Fatalf("%+v", st)
 	}
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`"name":"grant_v1"`)) || bytes.Contains(rec.Body.Bytes(), []byte(f.dir)) {
@@ -553,7 +553,7 @@ func TestServeRefusesEarly(t *testing.T) {
 	})
 	t.Setenv(readyEnv, strconv.Itoa(int(w.Fd())))
 	dir := filepath.Join(t.TempDir(), "state")
-	err = Serve(context.Background(), Options{Dir: dir, Interval: time.Second, Host: "localhost", PubPath: filepath.Join(dir, "missing"), Socket: "/tmp/not-used"})
+	err = Serve(context.Background(), Options{Dir: dir, Interval: time.Second, Host: "host1", PubPath: filepath.Join(dir, "missing"), Socket: "/tmp/not-used"})
 	if codes.Code(err) != codes.Usage {
 		t.Fatal(codes.Code(err))
 	}
@@ -581,7 +581,7 @@ func TestServeRefusesEarly(t *testing.T) {
 	if err := os.WriteFile(sock, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err = Serve(context.Background(), Options{Dir: state, PubPath: pub, Host: "localhost", Socket: sock, Interval: DefaultInterval})
+	err = Serve(context.Background(), Options{Dir: state, PubPath: pub, Host: "host1", Socket: sock, Interval: DefaultInterval})
 	if codes.Code(err) != codes.BadSocket {
 		t.Fatal(codes.Code(err))
 	}
@@ -597,7 +597,7 @@ func TestServeRefusesEarly(t *testing.T) {
 	if err := os.Symlink(sock, link); err != nil {
 		t.Fatal(err)
 	}
-	err = Serve(context.Background(), Options{Dir: state, PubPath: pub, Host: "localhost", Socket: link, Interval: DefaultInterval})
+	err = Serve(context.Background(), Options{Dir: state, PubPath: pub, Host: "host1", Socket: link, Interval: DefaultInterval})
 	if codes.Code(err) != codes.BadSocket {
 		t.Fatal(codes.Code(err))
 	}
@@ -607,7 +607,7 @@ func TestServeRefusesEarly(t *testing.T) {
 
 	okSock := filepath.Join(sockDir, "ok")
 	t.Setenv(readyEnv, "nope")
-	err = Serve(context.Background(), Options{Dir: state, PubPath: pub, Host: "localhost", Socket: okSock, Interval: DefaultInterval})
+	err = Serve(context.Background(), Options{Dir: state, PubPath: pub, Host: "host1", Socket: okSock, Interval: DefaultInterval})
 	if codes.Code(err) != codes.ReadyFailed {
 		t.Fatal(codes.Code(err))
 	}
@@ -685,7 +685,7 @@ func TestServeReadyAndStale(t *testing.T) {
 	errc := make(chan error, 1)
 	go func() {
 		errc <- Serve(ctx, Options{
-			Dir: filepath.Join(base, "state"), PubPath: pub, Host: "localhost",
+			Dir: filepath.Join(base, "state"), PubPath: pub, Host: "host1",
 			Socket: sock, Interval: DefaultInterval,
 		})
 	}()
@@ -769,7 +769,7 @@ func TestServeCreatesParent(t *testing.T) {
 	errc := make(chan error, 1)
 	go func() {
 		errc <- Serve(ctx, Options{
-			Dir: filepath.Join(base, "state"), PubPath: pub, Host: "localhost",
+			Dir: filepath.Join(base, "state"), PubPath: pub, Host: "host1",
 			Socket: sock, Interval: MinInterval,
 		})
 	}()
@@ -801,5 +801,18 @@ func TestServeCreatesParent(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("shutdown")
+	}
+}
+
+func TestServeRefusesPlaceholderHost(t *testing.T) {
+	for _, host := range []string{"", "localhost"} {
+		dir := filepath.Join(t.TempDir(), "state")
+		err := Serve(context.Background(), Options{Dir: dir, Interval: DefaultInterval, Host: host, PubPath: filepath.Join(dir, "missing"), Socket: "/tmp/not-used"})
+		if codes.Code(err) != codes.HostUnset {
+			t.Fatalf("%q: %v", host, err)
+		}
+		if _, statErr := os.Lstat(dir); !os.IsNotExist(statErr) {
+			t.Fatalf("%q: state dir created", host)
+		}
 	}
 }

@@ -1,6 +1,6 @@
 {
   "name": "secsvc",
-  "exec": ["/usr/local/bin/secsvc", "serve", "--dir", "/var/lib/secsvc", "--pub", "/etc/secsvc/pub.hex", "--host", "localhost", "--socket", "/run/secsvc/sock", "--interval", "30s"],
+  "exec": ["/usr/local/bin/secsvc", "serve", "--dir", "/var/lib/secsvc", "--pub", "/etc/secsvc/pub.hex", "--host", "", "--socket", "/run/secsvc/sock", "--interval", "30s"],
   "type": "simple",
   "ready": "notify",
   "restart": "on-failure",

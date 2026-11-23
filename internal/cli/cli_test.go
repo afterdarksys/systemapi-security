@@ -68,20 +68,20 @@ func TestKeygenAndGrantPolicy(t *testing.T) {
 	if err := os.Chmod(seedPath, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "localhost", "--purpose", "security:read", "--ttl", "10m"}, 2, "seed_perms\n")
+	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "host1", "--purpose", "security:read", "--ttl", "10m"}, 2, "seed_perms\n")
 	if err := os.Chmod(seedPath, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	frozen := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 	now = func() time.Time { return frozen }
-	base := []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "localhost", "--purpose", "security:operate", "--ttl", "10m"}
-	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "localhost", "--purpose", "nope", "--ttl", "10m"}, 2, "grant_bad_shape\n")
-	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "localhost", "--purpose", "security:operate", "--ttl", "15m1s"}, 2, "grant_ttl\n")
-	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "localhost", "--purpose", "security:operate", "--ttl", "901s"}, 2, "grant_ttl\n")
-	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "localhost", "--purpose", "security:operate", "--ttl", "0s"}, 2, "grant_ttl\n")
-	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "localhost", "--purpose", "security:operate", "--ttl", "nope"}, 2, "usage\n")
-	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "bad actor", "--host", "localhost", "--purpose", "security:read", "--ttl", "10m"}, 2, "grant_bad_shape\n")
+	base := []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "host1", "--purpose", "security:operate", "--ttl", "10m"}
+	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "host1", "--purpose", "nope", "--ttl", "10m"}, 2, "grant_bad_shape\n")
+	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "host1", "--purpose", "security:operate", "--ttl", "15m1s"}, 2, "grant_ttl\n")
+	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "host1", "--purpose", "security:operate", "--ttl", "901s"}, 2, "grant_ttl\n")
+	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "host1", "--purpose", "security:operate", "--ttl", "0s"}, 2, "grant_ttl\n")
+	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "host1", "--purpose", "security:operate", "--ttl", "nope"}, 2, "usage\n")
+	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "bad actor", "--host", "host1", "--purpose", "security:read", "--ttl", "10m"}, 2, "grant_bad_shape\n")
 	want(t, out, errb, []string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "BAD", "--purpose", "security:read", "--ttl", "10m"}, 2, "grant_bad_shape\n")
 	want(t, out, errb, append(base, "--lease", "short"), 2, "grant_bad_shape\n")
 	want(t, out, errb, append(base, "--watch", "tmp"), 2, "grant_bad_shape\n")
@@ -94,7 +94,7 @@ func TestKeygenAndGrantPolicy(t *testing.T) {
 	want(t, out, errb, append(base, "--entitlement", "*", "--entitlement", "*"), 2, "grant_bad_shape\n")
 	want(t, out, errb, append(base, "--entitlement", "security.pwn"), 2, "grant_purpose\n")
 	want(t, out, errb, append(base, "--entitlement", "Bad_Name"), 2, "grant_bad_shape\n")
-	want(t, out, errb, []string{"grant", "--seed", filepath.Join(dir, "missing"), "--actor", "ops", "--host", "localhost", "--purpose", "security:read", "--ttl", "10m"}, 2, "bad_pub\n")
+	want(t, out, errb, []string{"grant", "--seed", filepath.Join(dir, "missing"), "--actor", "ops", "--host", "host1", "--purpose", "security:read", "--ttl", "10m"}, 2, "bad_pub\n")
 
 	out.Reset()
 	errb.Reset()
@@ -111,7 +111,7 @@ func TestKeygenAndGrantPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g, err := grant.Verify(doc, ed25519.PublicKey(pubRaw), "localhost", frozen)
+	g, err := grant.Verify(doc, ed25519.PublicKey(pubRaw), "host1", frozen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,10 +121,10 @@ func TestKeygenAndGrantPolicy(t *testing.T) {
 
 	out.Reset()
 	errb.Reset()
-	if c := Main([]string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "localhost", "--purpose", "security:read", "--ttl", "900s", "--lease", "lease-read1", "--entitlement", "security.read"}); c != 0 {
+	if c := Main([]string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "host1", "--purpose", "security:read", "--ttl", "900s", "--lease", "lease-read1", "--entitlement", "security.read"}); c != 0 {
 		t.Fatal(c, errb.String())
 	}
-	g, err = grant.Verify(strings.TrimSuffix(out.String(), "\n"), ed25519.PublicKey(pubRaw), "localhost", frozen)
+	g, err = grant.Verify(strings.TrimSuffix(out.String(), "\n"), ed25519.PublicKey(pubRaw), "host1", frozen)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestServeRejectsShortInterval(t *testing.T) {
 	out, errb := capture(t)
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "state")
-	want(t, out, errb, []string{"serve", "--dir", dir, "--pub", filepath.Join(parent, "pub"), "--host", "localhost", "--socket", "/tmp/secsvc-not-used", "--interval", "1s"}, 2, "usage\n")
+	want(t, out, errb, []string{"serve", "--dir", dir, "--pub", filepath.Join(parent, "pub"), "--host", "host1", "--socket", "/tmp/secsvc-not-used", "--interval", "1s"}, 2, "usage\n")
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestCallAgainstServe(t *testing.T) {
 	}
 	out.Reset()
 	errb.Reset()
-	if c := Main([]string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "localhost", "--purpose", "security:operate", "--ttl", "10m", "--lease", "lease-call1"}); c != 0 {
+	if c := Main([]string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "host1", "--purpose", "security:operate", "--ttl", "10m", "--lease", "lease-call1"}); c != 0 {
 		t.Fatal(c, errb.String(), out.String())
 	}
 	grantPath := filepath.Join(dir, "grant")
@@ -248,7 +248,7 @@ func TestCallAgainstServe(t *testing.T) {
 	}
 	out.Reset()
 	errb.Reset()
-	if c := Main([]string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "localhost", "--purpose", "security:operate", "--ttl", "10m", "--lease", "lease-call2", "--watch", "/proc/net"}); c != 0 {
+	if c := Main([]string{"grant", "--seed", seedPath, "--actor", "ops", "--host", "host1", "--purpose", "security:operate", "--ttl", "10m", "--lease", "lease-call2", "--watch", "/proc/net"}); c != 0 {
 		t.Fatal(c, errb.String())
 	}
 	grant2 := filepath.Join(dir, "grant2")
@@ -267,7 +267,7 @@ func TestCallAgainstServe(t *testing.T) {
 	errc := make(chan error, 1)
 	go func() {
 		errc <- api.Serve(ctx, api.Options{
-			Dir: state, PubPath: pubPath, Host: "localhost", Socket: sock, Interval: 30 * time.Second,
+			Dir: state, PubPath: pubPath, Host: "host1", Socket: sock, Interval: 30 * time.Second,
 		})
 	}()
 	t.Cleanup(func() {
@@ -285,7 +285,7 @@ func TestCallAgainstServe(t *testing.T) {
 
 	out.Reset()
 	errb.Reset()
-	if c := Main([]string{"call", "status", "--socket", sock, "--grant", grantPath}); c != 0 || errb.Len() != 0 || !bytes.Contains(out.Bytes(), []byte(`"host":"localhost"`)) {
+	if c := Main([]string{"call", "status", "--socket", sock, "--grant", grantPath}); c != 0 || errb.Len() != 0 || !bytes.Contains(out.Bytes(), []byte(`"host":"host1"`)) {
 		t.Fatalf("%d %q %q", c, errb.String(), out.String())
 	}
 	empty := filepath.Join(dir, "empty-grant")
@@ -368,4 +368,63 @@ func mustRead(t *testing.T, path string) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func TestServeRefusesPlaceholderHost(t *testing.T) {
+	out, errb := capture(t)
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "state")
+	base := []string{"serve", "--dir", dir, "--pub", filepath.Join(parent, "pub"), "--socket", "/tmp/secsvc-not-used"}
+	want(t, out, errb, append(append([]string{}, base...), "--host", "localhost"), 2, "host_unset\n")
+	want(t, out, errb, append(append([]string{}, base...), "--host", ""), 2, "host_unset\n")
+	want(t, out, errb, base, 2, "host_unset\n")
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+}
+
+// The shipped unit and service templates carry no host value, so a service
+// started without configuration refuses with host_unset.
+func TestShippedTemplatesHaveNoHost(t *testing.T) {
+	root := filepath.Join("..", "..")
+	var unit struct {
+		Exec []string `json:"exec"`
+	}
+	if err := json.Unmarshal(mustRead(t, filepath.Join(root, "units", "secsvc.json")), &unit); err != nil {
+		t.Fatal(err)
+	}
+	host := -1
+	for i, a := range unit.Exec {
+		if a == "--host" && i+1 < len(unit.Exec) {
+			host = i + 1
+		}
+	}
+	if host < 0 || unit.Exec[host] != "" {
+		t.Fatalf("unit host %v", unit.Exec)
+	}
+	for file, line := range map[string]string{
+		filepath.Join("packaging", "systemd", "service.env.example"): "SECSVC_HOST=",
+		filepath.Join("packaging", "openrc", "secsvc.confd"):         `secsvc_host=""`,
+	} {
+		found := false
+		for _, l := range strings.Split(string(mustRead(t, filepath.Join(root, file))), "\n") {
+			if strings.HasPrefix(l, "SECSVC_HOST=") || strings.HasPrefix(l, "secsvc_host=") {
+				if l != line {
+					t.Fatalf("%s: %q has a default", file, l)
+				}
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s: no host line", file)
+		}
+	}
+	svc := string(mustRead(t, filepath.Join(root, "packaging", "systemd", "secsvc.service")))
+	if !strings.Contains(svc, "--host ${SECSVC_HOST} ") {
+		t.Fatal("systemd unit does not take the host from SECSVC_HOST")
+	}
+	rc := string(mustRead(t, filepath.Join(root, "packaging", "openrc", "secsvc")))
+	if !strings.Contains(rc, "--host ${secsvc_host} ") || !strings.Contains(rc, `""|localhost|`) {
+		t.Fatal("openrc script does not refuse an unset or localhost host")
+	}
 }

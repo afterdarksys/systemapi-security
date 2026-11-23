@@ -8,7 +8,7 @@
 
 Order after that check:
 
-1. Host grammar, then load the public key. Log step `validate`.
+1. An empty `--host` or `localhost` is `host_unset`, before the state directory exists. Then host grammar, then load the public key. Log step `validate`.
 2. Open the state directory at mode `0700`. Log step `store`.
 3. Listen on the absolute socket path. Log step `listen`.
 4. `chmod` the socket to `0660`.

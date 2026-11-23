@@ -6,7 +6,7 @@ Local host security service for one Linux machine. The binary is `secsvc`. It li
 
 This is a local host service. Suite enrollment stays in systemapi. Packet inspection is out of scope. sahcore stays docs-only. The control-plane audit stays in systemapi. `secsvc` does not import sash, adssh, or systemapi.
 
-The shipped unit is `units/secsvc.json`. sahinit has no `User=`, so that unit cannot drop privileges. `--host localhost` in the unit is a placeholder; replace it with the host name the grants carry. Until sahinit is PID 1, an operator can run `secsvc serve` under any supervisor.
+The shipped unit is `units/secsvc.json`. sahinit has no `User=`, so that unit cannot drop privileges. The unit ships `--host ""` because sahinit does not expand variables: set it to the host name the grants carry. `serve` refuses an empty host or `localhost` with `host_unset`, so an unedited unit does not start. Until sahinit is PID 1, an operator can run `secsvc serve` under any supervisor.
 
 ```bash
 go build -o secsvc ./cmd/secsvc

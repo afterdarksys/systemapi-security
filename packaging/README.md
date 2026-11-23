@@ -3,7 +3,9 @@
 These are installable templates; no service is installed or enabled by this
 repository change. Build `secsvc` for the target Linux architecture and install it
 as `/usr/local/bin/secsvc`. Provision `/etc/secsvc/pub.hex` using the existing key
-workflow. Set a host name matching signed grants before starting the service.
+workflow. Set a host name matching signed grants before starting the service:
+`SECSVC_HOST` in `service.env` or `secsvc_host` in `conf.d/secsvc`. Neither has
+a default; `secsvc serve` refuses an empty host or `localhost` with `host_unset`.
 The daemon does not need the signing seed.
 
 ## systemd: Debian, Ubuntu, Red Hat, Rocky, Arch

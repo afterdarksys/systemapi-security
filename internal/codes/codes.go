@@ -39,6 +39,7 @@ const (
 	AuditTruncated = "audit_truncated"
 	NotRegular     = "not_regular"
 	ConfigScope    = "config_scope"
+	HostUnset      = "host_unset"
 )
 
 // Error is a stable code. Error() returns only that code.

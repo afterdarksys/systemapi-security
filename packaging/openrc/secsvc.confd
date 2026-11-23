@@ -1,2 +1,3 @@
-# Must match the host carried by signed secsvc grants.
-secsvc_host="replace-with-host-name"
+# Must match the host carried by signed secsvc grants. There is no default:
+# the service refuses to start while this is empty or localhost.
+secsvc_host=""

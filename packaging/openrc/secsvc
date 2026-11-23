@@ -17,7 +17,7 @@ depend() {
 start_pre() {
     # Host grammar matches the daemon; do not interpolate arbitrary arguments.
     case "${secsvc_host}" in
-        ""|*[!a-z0-9.-]*) eerror "Set secsvc_host in /etc/conf.d/secsvc"; return 1 ;;
+        ""|localhost|*[!a-z0-9.-]*) eerror "Set secsvc_host in /etc/conf.d/secsvc"; return 1 ;;
     esac
     checkpath --directory --mode 0700 --owner root:root /var/lib/secsvc || return 1
     checkpath --directory --mode 0750 --owner root:root /run/secsvc || return 1
