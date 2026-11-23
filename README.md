@@ -13,6 +13,14 @@ go build -o secsvc ./cmd/secsvc
 # or: ./build.sh
 ```
 
+## Breaking changes (hardening batch 1)
+
+- Grants are `secsvc/2` with a signed `iat`. `secsvc/1` grants are refused (`grant_bad_shape`); re-sign them with this binary's `secsvc grant`.
+- `--host` must be a real host name. Empty, `localhost` and the other loopback names, and IP literals are `host_unset`. Set it in the unit, `service.env`, or `conf.d/secsvc`.
+- An existing audit chain has no `audit.head` and is now `audit_truncated`. Run `secsvc audit anchor --dir /var/lib/secsvc` once, with the daemon stopped, then start it.
+- A version-1 integrity baseline is not used. Every watched path reports unbaselined until you re-baseline with `secsvc call baseline` and a `security.baseline` grant.
+- `listen_allow` and the auth thresholds need grant coverage of what they govern (`config_scope` otherwise), and `POST /v1/scan` spends its lease.
+
 ## Operator
 
 ```bash
@@ -23,6 +31,7 @@ secsvc serve --dir /var/lib/secsvc --pub /etc/secsvc/pub.hex \
   --host HOST --socket /run/secsvc/sock --interval 30s
 secsvc call status --socket /run/secsvc/sock --grant /tmp/grant.json
 secsvc audit verify --dir /var/lib/secsvc
+secsvc audit anchor --dir /var/lib/secsvc   # once, for a chain from before audit.head
 ```
 
 `keygen` prints the public key as 64 hex characters and writes the seed with `O_EXCL` at mode `0600`. The seed is not printed. `grant` checks policy before it loads the seed or signs. A purpose with no `--entitlement` flags receives that purpose's full ceiling. `--ttl` is a whole number of seconds, at most `15m`.
