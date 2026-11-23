@@ -3,8 +3,12 @@
 // Threats: a lease is spent before the commit and stays spent when the
 // commit fails. Path coverage is decided before any new path is Lstat'd.
 // High findings page once per kind per minute. The contact URL is not an
-// audit field. A failed audit does not save detector memory, so the next
-// scan retries. Status caps are advisory: a probe result never grants, and
+// audit field. A page leaves the host on a topic anyone who learns or
+// guesses it can read, so by default it carries a kind, a count and a random
+// reference, never the host, a path, a subject or an address. Pages are sent
+// after the scan commits, from a bounded queue, so a slow ntfy cannot hold
+// the API response past its write timeout. A failed audit does not save
+// detector memory, so the next scan retries. Status caps are advisory: a probe result never grants, and
 // the report carries a closed reason rather than a path, a contact, an
 // address, or an error string. This package does not verify grants.
 package engine
@@ -12,6 +16,7 @@ package engine
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +24,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -39,6 +45,7 @@ const (
 	detailMax      = 8 << 10
 	clipMax        = 200
 	procMax        = 1 << 20
+	pageQueueMax   = 64
 )
 
 // Status is the GET /v1/status body.
@@ -74,6 +81,28 @@ type Engine struct {
 	Sender   *notify.Sender
 	Proc     func() (tcp, tcp6 string, oversize bool, err error)
 	Log      func(code string)
+
+	pagesOnce sync.Once
+	pages     chan pageJob
+}
+
+// pageJob is one page handed from a committed scan to the pager.
+type pageJob struct {
+	id      string // the open-finding key
+	pageID  string
+	kind    string
+	sha     string
+	actor   string
+	lease   string
+	ts      int64 // the coalesce time the scan set
+	finding ids.Finding
+	contact notify.Contact
+	body    []byte
+}
+
+func (e *Engine) queue() chan pageJob {
+	e.pagesOnce.Do(func() { e.pages = make(chan pageJob, pageQueueMax) })
+	return e.pages
 }
 
 func (e *Engine) now() time.Time {
@@ -516,6 +545,7 @@ func (e *Engine) Scan(actor, lease string, exp int64) ([]ids.Finding, error) {
 	}
 	pruneCoalesce(st.Coalesce, now)
 
+	var jobs []pageJob
 	var found []ids.Finding
 	if cfg.AuthLog != "" {
 		pos := ids.AuthPos{Path: st.AuthPath, Ino: st.AuthIno, Dev: st.AuthDev, Offset: st.AuthOffset}
@@ -568,12 +598,8 @@ func (e *Engine) Scan(actor, lease string, exp int64) ([]ids.Finding, error) {
 			rec := store.OpenRec{Kind: f.Kind, Severity: f.Severity, Subject: f.Subject, Summary: f.Summary, FirstSeen: now.UTC().Format(time.RFC3339Nano), LastSeen: now.UTC().Format(time.RFC3339Nano), Observed: true}
 			if f.Severity != ids.SevHigh {
 				rec.Paged = true
-			} else {
-				okPage, err := e.page(actor, lease, f, &st, now)
-				if err != nil {
-					return nil, err
-				}
-				rec.Paged = okPage
+			} else if err := e.page(actor, lease, id, f, &rec, &st, now, &jobs); err != nil {
+				return nil, err
 			}
 			st.Open[id] = rec
 			continue
@@ -587,11 +613,9 @@ func (e *Engine) Scan(actor, lease string, exp int64) ([]ids.Finding, error) {
 		prev.Severity = f.Severity
 		prev.Subject = f.Subject
 		if f.Severity == ids.SevHigh && !prev.Paged {
-			okPage, err := e.page(actor, lease, f, &st, now)
-			if err != nil {
+			if err := e.page(actor, lease, id, f, &prev, &st, now, &jobs); err != nil {
 				return nil, err
 			}
-			prev.Paged = okPage
 		}
 		if f.Severity != ids.SevHigh {
 			prev.Paged = true
@@ -626,6 +650,9 @@ func (e *Engine) Scan(actor, lease string, exp int64) ([]ids.Finding, error) {
 	st.System = system
 	st.ConfigSHA256 = configHash(cfg)
 	if err := e.Store.PutIDS(st); err != nil {
+		return nil, err
+	}
+	if err := e.enqueue(jobs, &st, cfg.PageDetail, now); err != nil {
 		return nil, err
 	}
 	return openFindings(st), nil
@@ -689,57 +716,155 @@ func (e *Engine) auditFinding(actor, lease, action string, f ids.Finding, now ti
 	return e.Store.AppendEdge(edge)
 }
 
-func (e *Engine) page(actor, lease string, f ids.Finding, st *store.IDSState, now time.Time) (bool, error) {
+// page decides the page for a high finding. A missing contact marks it
+// paged; a bad contact or no sender is audited page.failed and left unpaged,
+// so the next scan retries; a page within a minute of the same kind is
+// audited page.coalesced. Otherwise the finding is marked paged and a job is
+// queued for the pager, which runs after the scan commits.
+func (e *Engine) page(actor, lease, id string, f ids.Finding, rec *store.OpenRec, st *store.IDSState, now time.Time, jobs *[]pageJob) error {
+	rec.Paged = false
 	raw, err := e.Store.Contact()
 	if errors.Is(err, store.ErrNone) {
-		return true, nil
+		rec.Paged = true
+		return nil
 	}
-	sha := ""
 	if err != nil {
-		return false, e.auditNotify(actor, lease, f.Kind, sha, "", codes.Code(err), now)
+		return e.auditPage(actor, lease, "page.failed", f.Kind, "", rec.PageID, codes.Code(err), now)
 	}
 	c, perr := notify.Parse(raw)
 	if perr != nil {
-		return false, e.auditNotify(actor, lease, f.Kind, notify.Fingerprint(raw), "", codes.Code(perr), now)
+		return e.auditPage(actor, lease, "page.failed", f.Kind, notify.Fingerprint(raw), rec.PageID, codes.Code(perr), now)
 	}
-	sha = c.SHA256
 	if ts, ok := st.Coalesce[f.Kind]; ok && now.Sub(time.Unix(0, ts)) < coalesceWindow {
-		if err := e.auditNotify(actor, lease, f.Kind, sha, "coalesced", "", now); err != nil {
-			return false, err
-		}
-		return true, nil
+		rec.Paged = true
+		return e.auditPage(actor, lease, "page.coalesced", f.Kind, c.SHA256, rec.PageID, "", now)
 	}
 	if e.Sender == nil {
-		return false, e.auditNotify(actor, lease, f.Kind, sha, "", codes.Failed, now)
+		return e.auditPage(actor, lease, "page.failed", f.Kind, c.SHA256, rec.PageID, codes.Failed, now)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), notify.Timeout)
-	defer cancel()
-	if err := e.Sender.Send(ctx, c, []byte(pageBody(e.Host, f))); err != nil {
-		return false, e.auditNotify(actor, lease, f.Kind, sha, "", codes.Code(err), now)
+	if rec.PageID == "" {
+		var b [8]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return codes.E(codes.Failed)
+		}
+		rec.PageID = hex.EncodeToString(b[:])
 	}
-	st.Coalesce[f.Kind] = now.UnixNano()
-	if err := e.auditNotify(actor, lease, f.Kind, sha, "sent", "", now); err != nil {
-		return false, err
-	}
-	return true, nil
+	ts := now.UnixNano()
+	st.Coalesce[f.Kind] = ts
+	rec.Paged = true
+	*jobs = append(*jobs, pageJob{
+		id: id, pageID: rec.PageID, kind: f.Kind, sha: c.SHA256, actor: actor, lease: lease,
+		ts: ts, finding: f, contact: c,
+	})
+	return nil
 }
 
-func (e *Engine) auditNotify(actor, lease, kind, sha, status, code string, now time.Time) error {
+// enqueue hands committed jobs to the pager without blocking. A full queue
+// is page.failed with queue_full, and the finding is unpaged again so the
+// next scan retries.
+func (e *Engine) enqueue(jobs []pageJob, st *store.IDSState, detail bool, now time.Time) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+	high := 0
+	for _, rec := range st.Open {
+		if rec.Severity == ids.SevHigh {
+			high++
+		}
+	}
+	q := e.queue()
+	changed := false
+	for _, j := range jobs {
+		j.body = []byte(pageBody(e.Host, j.finding, detail, high, j.pageID))
+		select {
+		case q <- j:
+		default:
+			if err := e.auditPage(j.actor, j.lease, "page.failed", j.kind, j.sha, j.pageID, codes.QueueFull, now); err != nil {
+				return err
+			}
+			changed = unpage(st, j) || changed
+		}
+	}
+	if changed {
+		return e.Store.PutIDS(*st)
+	}
+	return nil
+}
+
+// unpage undoes what page set for j while the finding is still the one paged.
+func unpage(st *store.IDSState, j pageJob) bool {
+	changed := false
+	if rec, ok := st.Open[j.id]; ok && rec.PageID == j.pageID && rec.Paged {
+		rec.Paged = false
+		st.Open[j.id] = rec
+		changed = true
+	}
+	if ts, ok := st.Coalesce[j.kind]; ok && ts == j.ts {
+		delete(st.Coalesce, j.kind)
+		changed = true
+	}
+	return changed
+}
+
+// Pager sends queued pages until ctx ends; pages still queued then are
+// page.failed and unpaged, so the next start retries them.
+func (e *Engine) Pager(ctx context.Context) {
+	q := e.queue()
+	for {
+		select {
+		case <-ctx.Done():
+			for {
+				select {
+				case j := <-q:
+					e.failPage(j, codes.Failed)
+				default:
+					return
+				}
+			}
+		case j := <-q:
+			e.deliver(ctx, j)
+		}
+	}
+}
+
+func (e *Engine) deliver(ctx context.Context, j pageJob) {
+	cctx, cancel := context.WithTimeout(ctx, notify.Timeout)
+	err := e.Sender.Send(cctx, j.contact, j.body)
+	cancel()
+	if err != nil {
+		e.failPage(j, codes.Code(err))
+		return
+	}
+	if err := e.auditPage(j.actor, j.lease, "page.sent", j.kind, j.sha, j.pageID, "", e.now()); err != nil {
+		e.log(codes.Code(err))
+	}
+}
+
+// failPage audits a failed send and unpages the finding under the engine
+// lock, so the next scan pages it again.
+func (e *Engine) failPage(j pageJob, code string) {
+	if err := e.auditPage(j.actor, j.lease, "page.failed", j.kind, j.sha, j.pageID, code, e.now()); err != nil {
+		e.log(codes.Code(err))
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st := e.Store.IDS()
+	if unpage(&st, j) {
+		if err := e.Store.PutIDS(st); err != nil {
+			e.log(codes.Code(err))
+		}
+	}
+}
+
+func (e *Engine) auditPage(actor, lease, action, kind, sha, pageID, code string, now time.Time) error {
 	detail, err := mustDetail(struct {
 		Kind   string `json:"kind"`
 		SHA    string `json:"contact_sha256"`
-		Status string `json:"status,omitempty"`
+		PageID string `json:"page_id,omitempty"`
 		Error  string `json:"error,omitempty"`
-	}{kind, sha, status, code})
+	}{kind, sha, pageID, code})
 	if err != nil {
 		return err
-	}
-	action := "notify.sent"
-	if status == "coalesced" {
-		action = "notify.coalesced"
-	}
-	if code != "" {
-		action = "notify.failed"
 	}
 	return e.Store.AppendAudit(actor, lease, action, detail, now)
 }
@@ -792,7 +917,7 @@ func ident(f ids.Finding) string {
 func openFindings(st store.IDSState) []ids.Finding {
 	out := make([]ids.Finding, 0, len(st.Open))
 	for _, rec := range st.Open {
-		out = append(out, ids.Finding{Kind: rec.Kind, Severity: rec.Severity, Subject: rec.Subject, Summary: rec.Summary})
+		out = append(out, ids.Finding{Kind: rec.Kind, Severity: rec.Severity, Subject: rec.Subject, Summary: rec.Summary, PageID: rec.PageID})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Subject != out[j].Subject {
@@ -835,7 +960,13 @@ func pruneCoalesce(m map[string]int64, now time.Time) {
 	}
 }
 
-func pageBody(host string, f ids.Finding) string {
+// pageBody is the page text. By default it names only the kind, the number
+// of open high findings and the page id. page_detail restores the host and
+// a clipped subject or summary.
+func pageBody(host string, f ids.Finding, detail bool, high int, ref string) string {
+	if !detail {
+		return "secsvc high " + f.Kind + ": " + strconv.Itoa(high) + " high finding(s) open, ref " + ref
+	}
 	sub := clip(f.Subject)
 	sum := clip(f.Summary)
 	switch f.Kind {

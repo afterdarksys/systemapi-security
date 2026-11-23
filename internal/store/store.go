@@ -94,6 +94,8 @@ type OpenRec struct {
 	Subject   string `json:"subject"`
 	Summary   string `json:"summary"`
 	Paged     bool   `json:"paged"`
+	// PageID is a random reference, the only finding identity a page carries.
+	PageID string `json:"page_id,omitempty"`
 }
 
 // IDSState is the detector memory. Map keys may contain a NUL.

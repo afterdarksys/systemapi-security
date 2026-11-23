@@ -94,7 +94,23 @@ type Options struct {
 var (
 	hookMu    sync.Mutex
 	orderHook func(step string)
+
+	// writeTimeout bounds every response. A scan answers after its commit
+	// and pages afterwards, so a slow ntfy never holds a response past it.
+	writeTimeout = 10 * time.Second
 )
+
+// newHTTPServer is the daemon's server with its fixed timeouts.
+func newHTTPServer(h http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      writeTimeout,
+		MaxHeaderBytes:    HeaderMax,
+		ErrorLog:          log.New(io.Discard, "", 0),
+	}
+}
 
 func note(step string) {
 	hookMu.Lock()
@@ -568,20 +584,17 @@ func Serve(ctx context.Context, opt Options) error {
 		Store: st, Host: opt.Host, Now: opt.Now, Pub: pub,
 		Sender: &notify.Sender{Log: logCode}, Log: logCode,
 	}
-	srv := &http.Server{
-		Handler:           &Server{Host: opt.Host, Pub: pub, Eng: eng, Now: opt.Now},
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       10 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		MaxHeaderBytes:    HeaderMax,
-		ErrorLog:          log.New(io.Discard, "", 0),
-	}
+	srv := newHTTPServer(&Server{Host: opt.Host, Pub: pub, Eng: eng, Now: opt.Now})
 	loopCtx, loopCancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
-	wg.Add(1)
+	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		eng.Loop(loopCtx, opt.Interval)
+	}()
+	go func() {
+		defer wg.Done()
+		eng.Pager(loopCtx)
 	}()
 	errc := make(chan error, 1)
 	go func() {

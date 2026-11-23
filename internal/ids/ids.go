@@ -59,6 +59,8 @@ type Finding struct {
 	Severity string `json:"severity"`
 	Subject  string `json:"subject"`
 	Summary  string `json:"summary"`
+	// PageID is the opaque reference a page carries; set on open findings.
+	PageID string `json:"page_id,omitempty"`
 }
 
 // BaselineVersion is the current baseline.json format. Version 1 recorded

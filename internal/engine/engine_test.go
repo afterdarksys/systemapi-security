@@ -122,6 +122,18 @@ func (c *capture) sender(ips []net.IP, postErr error, status int) *notify.Sender
 
 func publicIP() []net.IP { return []net.IP{net.ParseIP("1.1.1.1")} }
 
+// drainPages delivers every queued page on the test goroutine.
+func drainPages(e *Engine) {
+	for {
+		select {
+		case j := <-e.queue():
+			e.deliver(context.Background(), j)
+		default:
+			return
+		}
+	}
+}
+
 func TestIntegrityEdgesAndQuietRepeat(t *testing.T) {
 	e, dir := newEng(t)
 	a := filepath.Join(dir, "a")
@@ -149,14 +161,18 @@ func TestIntegrityEdgesAndQuietRepeat(t *testing.T) {
 	}
 	_, err = e.Scan("actor", "lease-scan", expAt())
 	wantCode(t, err, codes.GrantSpent)
+	if cap.posts != 0 {
+		t.Fatalf("paged inside the scan: %d", cap.posts)
+	}
+	drainPages(e)
 	if cap.posts != 1 {
 		t.Fatalf("posts %d", cap.posts)
 	}
-	if !strings.Contains(cap.bodies[0], "secsvc integrity_changed on localhost: "+a) {
-		t.Fatalf("body %q", cap.bodies[0])
+	if want := "secsvc high integrity_changed: 2 high finding(s) open, ref " + found[0].PageID; cap.bodies[0] != want || found[0].PageID == "" {
+		t.Fatalf("body %q want %q", cap.bodies[0], want)
 	}
 	acts := actions(t, e)
-	if countAction(acts, "ids.finding") != 2 || countAction(acts, "notify.sent") != 1 || countAction(acts, "notify.coalesced") != 1 {
+	if countAction(acts, "ids.finding") != 2 || countAction(acts, "page.sent") != 1 || countAction(acts, "page.coalesced") != 1 {
 		t.Fatalf("actions %v", acts)
 	}
 	writeFile(t, a, "three!!")
@@ -226,7 +242,8 @@ func TestNoContactSkipsNotify(t *testing.T) {
 		t.Fatal(err)
 	}
 	acts := actions(t, e)
-	if countAction(acts, "notify.sent") != 0 || countAction(acts, "notify.failed") != 0 || countAction(acts, "ids.finding") != 1 {
+	drainPages(e)
+	if countAction(acts, "page.sent") != 0 || countAction(acts, "page.failed") != 0 || countAction(acts, "ids.finding") != 1 {
 		t.Fatalf("actions %v", acts)
 	}
 	if cap.posts != 0 {
@@ -649,7 +666,7 @@ func TestContactEgressDoesNotSpend(t *testing.T) {
 		t.Fatal(err)
 	}
 	acts := actions(t, e)
-	if countAction(acts, "notify.failed") != 0 || countAction(acts, "notify.set") != 1 {
+	if countAction(acts, "page.failed") != 0 || countAction(acts, "notify.set") != 1 {
 		t.Fatalf("actions %v", acts)
 	}
 }
