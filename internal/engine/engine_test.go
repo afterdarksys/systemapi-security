@@ -679,11 +679,20 @@ func TestAuthEdge(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(found) != 0 {
-		t.Fatalf("under threshold %+v", found)
+		t.Fatalf("first scan paged on history %+v", found)
 	}
+	// The first scan started at the end, so the four old failures do not
+	// count. Five new ones cross the limit.
 	f, err := os.OpenFile(logp, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := f.WriteString(strings.Repeat("Failed password for root from 9.9.9.9 port 22 ssh2\n", 4)); err != nil {
+		t.Fatal(err)
+	}
+	found, err = e.Scan("secsvc", "", 0)
+	if err != nil || len(found) != 0 {
+		t.Fatalf("under threshold %+v %v", found, err)
 	}
 	if _, err := f.WriteString("Failed password for root from 9.9.9.9 port 22 ssh2\n"); err != nil {
 		t.Fatal(err)

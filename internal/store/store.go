@@ -87,6 +87,9 @@ type IDSState struct {
 	System       modules.Snapshot   `json:"system"`
 	ConfigSHA256 string             `json:"config_sha256"`
 	AuthOffset   int64              `json:"auth_offset"`
+	AuthPath     string             `json:"auth_path,omitempty"`
+	AuthIno      uint64             `json:"auth_ino,omitempty"`
+	AuthDev      uint64             `json:"auth_dev,omitempty"`
 	AuthEvents   []int64            `json:"auth_events"`
 	Open         map[string]OpenRec `json:"open"`
 	LastScan     string             `json:"last_scan"`

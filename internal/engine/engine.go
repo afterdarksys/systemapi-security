@@ -416,8 +416,9 @@ func (e *Engine) Scan(actor, lease string, exp int64) ([]ids.Finding, error) {
 
 	var found []ids.Finding
 	if cfg.AuthLog != "" {
-		next, ev, f := ids.ScanAuth(cfg.AuthLog, st.AuthOffset, st.AuthEvents, cfg.AuthFailLimit, cfg.AuthWindowS, now)
-		st.AuthOffset = next
+		pos := ids.AuthPos{Path: st.AuthPath, Ino: st.AuthIno, Dev: st.AuthDev, Offset: st.AuthOffset}
+		next, ev, f := ids.ScanAuth(cfg.AuthLog, pos, st.AuthEvents, cfg.AuthFailLimit, cfg.AuthWindowS, now)
+		st.AuthPath, st.AuthIno, st.AuthDev, st.AuthOffset = next.Path, next.Ino, next.Dev, next.Offset
 		st.AuthEvents = ev
 		if f != nil {
 			found = append(found, *f)

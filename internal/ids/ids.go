@@ -83,12 +83,28 @@ var (
 	hexAddr     = regexp.MustCompile(`^[0-9A-Fa-f]+:[0-9A-Fa-f]+$`)
 )
 
-// ScanAuth tails path from offset. A read error yields one medium finding and
-// leaves offset and events unchanged. Count uses timestamps inside the window.
-func ScanAuth(path string, offset int64, events []int64, limit, windowS int, now time.Time) (int64, []int64, *Finding) {
-	lines, next, err := readWindow(path, offset)
+// AuthPos is where the auth tail stopped: the file it read, identified by
+// path, inode, and device, and the byte offset after the last whole line.
+type AuthPos struct {
+	Path   string
+	Ino    uint64
+	Dev    uint64
+	Offset int64
+}
+
+// ScanAuth tails path from pos. A read error yields one medium finding and
+// leaves pos and events unchanged. Count uses timestamps inside the window.
+//
+// Threats: (a) rotation is a different inode or device, or a size below the
+// offset, and restarts at 0, so a new file that grew past the old offset is
+// not skipped. (b) A first scan of a path, with no saved position for it,
+// starts at the end of the file and pages on nothing: old lines would be
+// dated now. (c) The IP comes only from sshd's fixed structure, never from a
+// substring an attacker can put in a user name.
+func ScanAuth(path string, pos AuthPos, events []int64, limit, windowS int, now time.Time) (AuthPos, []int64, *Finding) {
+	lines, next, err := readWindow(path, pos)
 	if err != nil {
-		return offset, append([]int64(nil), events...), &Finding{
+		return pos, append([]int64(nil), events...), &Finding{
 			Kind: KindAuthNA, Severity: SevMedium, Subject: KindAuthNA, Summary: "auth log unavailable",
 		}
 	}
@@ -133,63 +149,70 @@ func authFail(line string) bool {
 	return false
 }
 
+// lineIP reads sshd's "... from ADDR port N ..." structure: the token after
+// the last " from " before the last " port ". A user name can contain
+// " from " but sshd writes the real address and port after it. Anything that
+// does not parse as an IP yields no IP.
 func lineIP(line string) string {
-	for _, key := range []string{" from ", "rhost="} {
-		rest := line
-		for {
-			i := strings.Index(rest, key)
-			if i < 0 {
-				break
-			}
-			rest = rest[i+len(key):]
-			end := len(rest)
-			for j := 0; j < len(rest); j++ {
-				if rest[j] == ' ' || rest[j] == ',' {
-					end = j
-					break
-				}
-			}
-			if ip := net.ParseIP(rest[:end]); ip != nil {
-				return ip.String()
-			}
-		}
+	i := strings.LastIndex(line, " port ")
+	if i < 0 {
+		return ""
+	}
+	head := line[:i]
+	j := strings.LastIndex(head, " from ")
+	if j < 0 {
+		return ""
+	}
+	tok := head[j+len(" from "):]
+	if strings.ContainsAny(tok, " \t") {
+		return ""
+	}
+	if ip := net.ParseIP(tok); ip != nil {
+		return ip.String()
 	}
 	return ""
 }
 
-func readWindow(path string, offset int64) ([]string, int64, error) {
+func readWindow(path string, pos AuthPos) ([]string, AuthPos, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
-		return nil, offset, err
+		return nil, pos, err
 	}
 	if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
-		return nil, offset, codes.E(codes.BadPath)
+		return nil, pos, codes.E(codes.BadPath)
 	}
-	if offset < 0 || offset > fi.Size() {
-		offset = 0
-	}
-	f, _, err := openRegular(path)
+	f, st, err := openRegular(path)
 	if err != nil {
-		return nil, offset, err
+		return nil, pos, err
 	}
 	defer f.Close()
+	cur := AuthPos{Path: path, Ino: uint64(st.Ino), Dev: uint64(st.Dev), Offset: pos.Offset}
+	if pos.Path != path {
+		cur.Offset = st.Size
+		return nil, cur, nil
+	}
+	if pos.Ino != cur.Ino || pos.Dev != cur.Dev || pos.Offset < 0 || pos.Offset > st.Size {
+		cur.Offset = 0
+	}
+	offset := cur.Offset
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return nil, offset, err
+		return nil, pos, err
 	}
 	buf := make([]byte, ScanMax)
 	n, err := io.ReadFull(f, buf)
 	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-		return nil, offset, err
+		return nil, pos, err
 	}
 	data := buf[:n]
 	if len(data) == 0 {
-		return nil, offset, nil
+		return nil, cur, nil
 	}
 	rel := bytes.LastIndexByte(data, '\n')
 	if rel < 0 {
-		return nil, offset + int64(len(data)), nil
+		cur.Offset = offset + int64(len(data))
+		return nil, cur, nil
 	}
-	next := offset + int64(rel) + 1
+	cur.Offset = offset + int64(rel) + 1
 	parts := bytes.Split(data[:rel], []byte{'\n'})
 	lines := make([]string, 0, len(parts))
 	for _, p := range parts {
@@ -198,7 +221,7 @@ func readWindow(path string, offset int64) ([]string, int64, error) {
 		}
 		lines = append(lines, string(p))
 	}
-	return lines, next, nil
+	return lines, cur, nil
 }
 
 // Check reports the integrity state of path. A nil base means the path has no

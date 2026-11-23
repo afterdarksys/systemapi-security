@@ -24,9 +24,9 @@ func TestScanAuth(t *testing.T) {
 		}
 	}
 	write("Accepted password for root from 1.2.3.4 port 22\nFailed password for root from 9.9.9.9 port 22\n")
-	off, ev, f := ScanAuth(logp, 0, nil, 5, 300, now)
-	if f != nil || len(ev) != 1 || off == 0 {
-		t.Fatalf("under %+v %d %d", f, len(ev), off)
+	off, ev, f := ScanAuth(logp, at(t, logp, 0), nil, 5, 300, now)
+	if f != nil || len(ev) != 1 || off.Offset == 0 {
+		t.Fatalf("under %+v %d %+v", f, len(ev), off)
 	}
 	// Four more failures cross the limit of 5. Accepted is not a failure.
 	more := "Accepted publickey for root\n"
@@ -34,7 +34,7 @@ func TestScanAuth(t *testing.T) {
 		more += "Failed password for root from 1.2.3.4 port 22\n"
 	}
 	write("Accepted password for root from 1.2.3.4 port 22\nFailed password for root from 9.9.9.9 port 22\n" + more)
-	off, ev, f = ScanAuth(logp, 0, nil, 5, 300, now)
+	off, ev, f = ScanAuth(logp, at(t, logp, 0), nil, 5, 300, now)
 	if f == nil || f.Kind != KindAuth || f.Severity != SevHigh || f.Subject != KindAuth {
 		t.Fatalf("%+v", f)
 	}
@@ -49,25 +49,25 @@ func TestScanAuth(t *testing.T) {
 	if f2 == nil || len(ev2) != len(ev) {
 		t.Fatalf("still %d %+v", len(ev2), f2)
 	}
-	// Lowercase does not match. rhost= supplies the IP.
+	// Lowercase does not match. rhost= is not sshd structure and gives no IP.
 	write("failed password for root\nauthentication failure; rhost=8.8.8.8\nInvalid user bob\nFailed publickey for root from 8.8.4.4 port 22\n")
-	_, _, f = ScanAuth(logp, 0, nil, 3, 300, now)
-	if f == nil || f.Summary != "3 failures from 8.8.8.8" {
+	_, _, f = ScanAuth(logp, at(t, logp, 0), nil, 3, 300, now)
+	if f == nil || f.Summary != "3 failures from 8.8.4.4" {
 		t.Fatalf("%+v", f)
 	}
 	// No IP in this scan.
 	write("Failed password for nobody\n")
-	_, _, f = ScanAuth(logp, 0, nil, 1, 300, now)
+	_, _, f = ScanAuth(logp, at(t, logp, 0), nil, 1, 300, now)
 	if f == nil || f.Summary != "1 failures" {
 		t.Fatalf("%+v", f)
 	}
 	// Window drops old events and keeps an equal age.
 	old := []int64{now.Unix() - 301, now.Unix() - 300}
-	_, ev, f = ScanAuth(logp, 0, old, 2, 300, now.Add(time.Hour))
+	_, ev, f = ScanAuth(logp, at(t, logp, 0), old, 2, 300, now.Add(time.Hour))
 	// file still has 1 line but now is an hour later, so the line's event is "now" of this call.
 	// Use the same now as the timestamps' base by passing now, and a log with no new lines.
 	write("")
-	_, ev, f = ScanAuth(logp, 0, old, 2, 300, now)
+	_, ev, f = ScanAuth(logp, at(t, logp, 0), old, 2, 300, now)
 	if f != nil || len(ev) != 1 || ev[0] != now.Unix()-300 {
 		t.Fatalf("window %+v %v", f, ev)
 	}
@@ -76,9 +76,9 @@ func TestScanAuth(t *testing.T) {
 	if err := os.WriteFile(logp, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	off, ev, f = ScanAuth(logp, 0, nil, 1, 300, now)
-	if f != nil || len(ev) != 0 || off != int64(len(raw)) {
-		t.Fatalf("partial %d %v %+v", off, ev, f)
+	off, ev, f = ScanAuth(logp, at(t, logp, 0), nil, 1, 300, now)
+	if f != nil || len(ev) != 0 || off.Offset != int64(len(raw)) {
+		t.Fatalf("partial %+v %v %+v", off, ev, f)
 	}
 	// A later complete line is read. The skipped partial stays skipped.
 	if err := os.WriteFile(logp, append(raw, []byte("\nFailed password for root from 1.1.1.1 port 1\n")...), 0o600); err != nil {
@@ -93,7 +93,7 @@ func TestScanAuth(t *testing.T) {
 	if err := os.WriteFile(logp, []byte(long), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, ev, f = ScanAuth(logp, 0, nil, 1, 300, now)
+	_, ev, f = ScanAuth(logp, at(t, logp, 0), nil, 1, 300, now)
 	if f != nil || len(ev) != 0 {
 		t.Fatalf("long %+v %d", f, len(ev))
 	}
@@ -110,18 +110,18 @@ func TestScanAuth(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Fatal(err)
 	}
-	off, ev, f = ScanAuth(link, 7, []int64{now.Unix()}, 1, 300, now)
+	off, ev, f = ScanAuth(link, AuthPos{Path: link, Offset: 7}, []int64{now.Unix()}, 1, 300, now)
 	if f == nil || f.Kind != KindAuthNA || f.Summary != "auth log unavailable" || f.Subject != KindAuthNA {
 		t.Fatalf("%+v", f)
 	}
-	if off != 7 || len(ev) != 1 || strings.Contains(f.Summary, target) {
-		t.Fatalf("kept %d %v %s", off, ev, f.Summary)
+	if off != (AuthPos{Path: link, Offset: 7}) || len(ev) != 1 || strings.Contains(f.Summary, target) {
+		t.Fatalf("kept %+v %v %s", off, ev, f.Summary)
 	}
 	// Directory and missing are unavailable.
-	if _, _, f = ScanAuth(dir, 0, nil, 1, 300, now); f == nil || f.Kind != KindAuthNA {
+	if _, _, f = ScanAuth(dir, AuthPos{}, nil, 1, 300, now); f == nil || f.Kind != KindAuthNA {
 		t.Fatal(f)
 	}
-	if _, _, f = ScanAuth(filepath.Join(dir, "missing"), 0, nil, 1, 300, now); f == nil || f.Kind != KindAuthNA {
+	if _, _, f = ScanAuth(filepath.Join(dir, "missing"), AuthPos{}, nil, 1, 300, now); f == nil || f.Kind != KindAuthNA {
 		t.Fatal(f)
 	}
 	// Cap keeps newest and still fires.
@@ -130,7 +130,7 @@ func TestScanAuth(t *testing.T) {
 		many = append(many, now.Unix())
 	}
 	write("")
-	_, ev, f = ScanAuth(logp, 0, many, EventsMax, 300, now)
+	_, ev, f = ScanAuth(logp, at(t, logp, 0), many, EventsMax, 300, now)
 	if f == nil || len(ev) != EventsMax {
 		t.Fatalf("cap %d %+v", len(ev), f)
 	}
@@ -335,7 +335,7 @@ func TestFIFODoesNotBlock(t *testing.T) {
 		if f := Check(fifo, &Record{SHA256: strings.Repeat("a", 64)}); f.Kind != KindNotReg || f.Severity != SevHigh {
 			t.Errorf("check: %+v", f)
 		}
-		_, _, f := ScanAuth(fifo, 0, nil, 5, 300, time.Unix(1_700_000_000, 0))
+		_, _, f := ScanAuth(fifo, AuthPos{Path: fifo}, nil, 5, 300, time.Unix(1_700_000_000, 0))
 		if f == nil || f.Kind != KindAuthNA {
 			t.Errorf("auth: %+v", f)
 		}
@@ -417,3 +417,101 @@ func TestUpgradeKeepsV1Fields(t *testing.T) {
 }
 
 func ptr(r Record) *Record { return &r }
+
+// at is a saved position on the current file at logp.
+func at(t *testing.T, logp string, off int64) AuthPos {
+	t.Helper()
+	var st unix.Stat_t
+	if err := unix.Lstat(logp, &st); err != nil {
+		return AuthPos{Path: logp, Offset: off}
+	}
+	return AuthPos{Path: logp, Ino: uint64(st.Ino), Dev: uint64(st.Dev), Offset: off}
+}
+
+func TestAuthFirstScanStartsAtEnd(t *testing.T) {
+	dir := t.TempDir()
+	logp := filepath.Join(dir, "auth.log")
+	now := time.Unix(1_700_000_000, 0)
+	history := strings.Repeat("Failed password for root from 9.9.9.9 port 22 ssh2\n", 20)
+	if err := os.WriteFile(logp, []byte(history), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pos, ev, f := ScanAuth(logp, AuthPos{}, nil, 5, 300, now)
+	if f != nil || len(ev) != 0 || pos.Offset != int64(len(history)) || pos.Path != logp || pos.Ino == 0 {
+		t.Fatalf("first scan paged on history: %+v %v %+v", f, ev, pos)
+	}
+	// A saved position for another path is a first scan too.
+	pos2, ev, f := ScanAuth(logp, AuthPos{Path: "/var/log/other", Offset: 0}, nil, 5, 300, now)
+	if f != nil || len(ev) != 0 || pos2.Offset != int64(len(history)) {
+		t.Fatalf("new path paged on history: %+v %v", f, ev)
+	}
+	fh, err := os.OpenFile(logp, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fh.WriteString("Failed password for root from 1.2.3.4 port 22 ssh2\n"); err != nil {
+		t.Fatal(err)
+	}
+	fh.Close()
+	_, ev, _ = ScanAuth(logp, pos, nil, 5, 300, now)
+	if len(ev) != 1 {
+		t.Fatalf("new line not read: %v", ev)
+	}
+}
+
+func TestAuthRotationByInode(t *testing.T) {
+	dir := t.TempDir()
+	logp := filepath.Join(dir, "auth.log")
+	now := time.Unix(1_700_000_000, 0)
+	old := strings.Repeat("Accepted publickey for root from 1.2.3.4 port 22 ssh2\n", 4)
+	if err := os.WriteFile(logp, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pos, _, _ := ScanAuth(logp, AuthPos{}, nil, 3, 300, now)
+	// Rotate: the new file grows past the old offset before the next scan.
+	if err := os.Rename(logp, logp+".1"); err != nil {
+		t.Fatal(err)
+	}
+	fresh := strings.Repeat("Failed password for root from 5.6.7.8 port 22 ssh2\n", 3) +
+		strings.Repeat("Accepted publickey for root from 1.2.3.4 port 22 ssh2\n", 4)
+	if int64(len(fresh)) <= pos.Offset {
+		t.Fatal("fixture must grow past the old offset")
+	}
+	if err := os.WriteFile(logp, []byte(fresh), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	next, ev, f := ScanAuth(logp, pos, nil, 3, 300, now)
+	if f == nil || f.Summary != "3 failures from 5.6.7.8" || len(ev) != 3 {
+		t.Fatalf("rotation missed: %+v %v", f, ev)
+	}
+	if next.Ino == pos.Ino && next.Dev == pos.Dev {
+		t.Fatal("inode not tracked")
+	}
+	// Truncation in place (same inode, size below offset) also restarts.
+	if err := os.WriteFile(logp, []byte("Failed password for root from 5.6.7.8 port 22 ssh2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, ev, _ = ScanAuth(logp, next, nil, 3, 300, now)
+	if len(ev) != 1 {
+		t.Fatalf("truncation missed: %v", ev)
+	}
+}
+
+func TestLineIPFromSSHDStructureOnly(t *testing.T) {
+	cases := map[string]string{
+		"Failed password for root from 203.0.113.9 port 22 ssh2":                                "203.0.113.9",
+		"Failed password for invalid user x from 6.6.6.6 port 1 from 198.51.100.7 port 22 ssh2": "198.51.100.7",
+		"Invalid user from 6.6.6.6 from 192.0.2.1 port 4242":                                    "192.0.2.1",
+		"Failed publickey for root from 2001:db8::1 port 22 ssh2":                               "2001:db8::1",
+		"Failed password for from 6.6.6.6 port":                                                 "",
+		"Failed password for root from 6.6.6.6":                                                 "",
+		"authentication failure; rhost=6.6.6.6 user=root":                                       "",
+		"Failed password for root from not-an-ip port 22 ssh2":                                  "",
+		"Invalid user a from 6.6.6.6 port 1 from host.example port 22":                          "",
+	}
+	for line, want := range cases {
+		if got := lineIP(line); got != want {
+			t.Errorf("%q: got %q want %q", line, got, want)
+		}
+	}
+}

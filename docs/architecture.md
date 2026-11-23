@@ -83,7 +83,7 @@ Mode `0700`. Files are mode `0600`.
 | `config.json` | `auth_log`, `auth_fail_limit`, `auth_window_s`, `watch`, `listen_allow`, `modules` |
 | `contact` | the ntfy contact string |
 | `baseline.json` | `{"v":2,"records":{...}}`: per watched path, SHA-256, size, full mode, uid, gid |
-| `ids-state.json` | offsets, open findings, coalesce times, last scan |
+| `ids-state.json` | auth position (path, inode, device, offset), open findings, coalesce times, last scan |
 | `spent.json` | lease id to expiry |
 | `audit.jsonl` | hash chain |
 | `audit.head` | anchor: last seq and hash of the chain |
@@ -103,7 +103,7 @@ Each row's hash is SHA-256 over the canonical JSON of `seq`, `prev`, `time`, `ac
 
 Three detectors, off until configured.
 
-Auth tail reads `auth_log` from a stored offset. Matching is a fixed substring list. The raw line is not a finding. Five failures in 300 seconds is the default, and the finding is `auth_fail` at severity `high`. An unreadable log suppresses `auth_fail` for that scan and records `auth_log_unavailable` at `medium`.
+Auth tail reads `auth_log` from a stored position: path, inode, device, and offset. A different inode or device, or a size below the offset, is rotation and restarts at 0, so a new file that grew past the old offset is still read. The first scan of a path with no saved position for it (a new install, a changed `auth_log`, or state from an older binary) starts at the end of the file and pages on nothing, because old lines would otherwise be dated now. The IP in the summary comes only from sshd's fixed structure, the token after the last ` from ` that precedes the last ` port `, and must parse as an IP; otherwise the summary has no IP. PAM `rhost=` is not read. Matching is a fixed substring list. The raw line is not a finding. Five failures in 300 seconds is the default, and the finding is `auth_fail` at severity `high`. An unreadable log suppresses `auth_fail` for that scan and records `auth_log_unavailable` at `medium`.
 
 Integrity `Lstat`s each watch path and does not follow a symlink. A symlink, a missing baselined path, a changed hash or size, a changed mode (file type, setuid, setgid, sticky, or permission bits), uid, or gid, or an unreadable baselined file is `high`. A version-1 baseline (permission bits only) is upgraded once, on the next scan, with a `baseline.upgraded` audit row: its hash, size, and permission bits are kept, so a change made before the upgrade is still a finding, and the type, setuid, setgid, sticky, uid, and gid are read from the file at that moment. An unbaselined path is `medium`. `POST /v1/baseline` measures the current watch list. Every open of a configured path, by a scan or by the status probe, is `O_NONBLOCK|O_NOFOLLOW` and checks with fstat that the file is regular before any read; a FIFO, socket, or device is `integrity_not_file` (or `auth_log_unavailable`, or a capability `unreadable`) with internal code `not_regular`, never a blocking read. Reads are capped (1 MiB per auth scan, 4 MiB per hashed file).
 
