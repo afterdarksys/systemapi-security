@@ -99,7 +99,7 @@ func (e *Engine) Loop(ctx context.Context, every time.Duration) {
 }
 
 func (e *Engine) quiet() {
-	if _, err := e.Scan("secsvc", ""); err != nil {
+	if _, err := e.Scan("secsvc", "", 0); err != nil {
 		e.log(codes.Code(err))
 	}
 }
@@ -386,10 +386,18 @@ func (e *Engine) failCommit(actor, lease, action string, commit error) error {
 }
 
 // Scan runs the detectors, writes edges, and returns the open set.
-func (e *Engine) Scan(actor, lease string) ([]ids.Finding, error) {
+// Threats: a granted scan spends its lease before any detector runs, exactly
+// once, as a config mutation does, so one grant cannot replay scans (and the
+// pages they send) for its whole TTL. The internal loop passes no lease.
+func (e *Engine) Scan(actor, lease string, exp int64) ([]ids.Finding, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	now := e.now()
+	if lease != "" {
+		if err := e.Store.Spend(lease, exp, now); err != nil {
+			return nil, err
+		}
+	}
 	cfg := e.Store.Config()
 	base := e.Store.Baseline()
 	st := e.Store.IDS()

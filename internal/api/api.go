@@ -298,7 +298,7 @@ func (s *Server) findings(w http.ResponseWriter, g *grant.Grant, scan bool) {
 	var found []ids.Finding
 	var err error
 	if scan {
-		found, err = s.Eng.Scan(g.Actor, g.LeaseID)
+		found, err = s.Eng.Scan(g.Actor, g.LeaseID, g.Exp)
 	} else {
 		found, err = s.Eng.Findings()
 	}

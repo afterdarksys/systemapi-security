@@ -52,7 +52,7 @@ Header `X-Secsvc-Grant`. One value. Body cap 64 KiB. Header cap 32 KiB. Read hea
 | `POST` | `/v1/scan` | `security.scan` |
 | `GET` | `/v1/status` | `security.read` |
 
-`POST /v1/scan` and `POST /v1/baseline` require an empty body. `PUT /v1/config` replaces the whole config. `{}` is a valid replace and clears `auth_log`, `watch`, and `listen_allow`. `GET /v1/audit` that fails chain verification returns `500` `audit_bad`. Audit JSON uses the API field names `seq`, `prev`, `time`, `actor`, `lease_id`, `action`, `detail`, `hash`.
+`POST /v1/scan` and `POST /v1/baseline` require an empty body. Both spend the grant's lease, so a second scan on the same grant is `grant_spent`. The internal scan loop spends nothing. `PUT /v1/config` replaces the whole config. `{}` is a valid replace and clears `auth_log`, `watch`, and `listen_allow`. `GET /v1/audit` that fails chain verification returns `500` `audit_bad`. Audit JSON uses the API field names `seq`, `prev`, `time`, `actor`, `lease_id`, `action`, `detail`, `hash`.
 
 ## Capabilities
 

@@ -140,13 +140,15 @@ func TestIntegrityEdgesAndQuietRepeat(t *testing.T) {
 	if err := e.PutContact("actor", "lease-ntfy1", expAt(), notify.Prefix+notify.Base+topic); err != nil {
 		t.Fatal(err)
 	}
-	found, err := e.Scan("actor", "lease-scan")
+	found, err := e.Scan("actor", "lease-scan", expAt())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(found) != 2 || found[0].Kind != ids.KindChange || found[1].Subject != b {
 		t.Fatalf("findings %+v", found)
 	}
+	_, err = e.Scan("actor", "lease-scan", expAt())
+	wantCode(t, err, codes.GrantSpent)
 	if cap.posts != 1 {
 		t.Fatalf("posts %d", cap.posts)
 	}
@@ -158,7 +160,7 @@ func TestIntegrityEdgesAndQuietRepeat(t *testing.T) {
 		t.Fatalf("actions %v", acts)
 	}
 	writeFile(t, a, "three!!")
-	if _, err := e.Scan("secsvc", ""); err != nil {
+	if _, err := e.Scan("secsvc", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	acts = actions(t, e)
@@ -174,14 +176,14 @@ func TestIntegrityEdgesAndQuietRepeat(t *testing.T) {
 	}
 	writeFile(t, a, "one")
 	writeFile(t, b, "one")
-	if _, err := e.Scan("secsvc", ""); err != nil {
+	if _, err := e.Scan("secsvc", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	acts = actions(t, e)
 	if countAction(acts, "ids.resolved") != 2 {
 		t.Fatalf("resolved %v", acts)
 	}
-	if _, err := e.Scan("secsvc", ""); err != nil {
+	if _, err := e.Scan("secsvc", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := actions(t, e); len(got) != len(acts) {
@@ -220,7 +222,7 @@ func TestNoContactSkipsNotify(t *testing.T) {
 	writeFile(t, p, "two")
 	cap := &capture{}
 	e.Sender = cap.sender(publicIP(), nil, 200)
-	if _, err := e.Scan("secsvc", ""); err != nil {
+	if _, err := e.Scan("secsvc", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	acts := actions(t, e)
@@ -345,7 +347,7 @@ func TestSymlinkWatchIsNotFollowed(t *testing.T) {
 	if err := os.Symlink(secret, link); err != nil {
 		t.Fatal(err)
 	}
-	found, err := e.Scan("secsvc", "")
+	found, err := e.Scan("secsvc", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,7 +367,7 @@ func TestListenProc(t *testing.T) {
 		calls++
 		return "", "", true, nil
 	}
-	if _, err := e.Scan("secsvc", ""); err != nil {
+	if _, err := e.Scan("secsvc", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	st, err := e.Status()
@@ -391,7 +393,7 @@ func TestListenProc(t *testing.T) {
 		calls++
 		return "", "", true, nil
 	}
-	if _, err := e2.Scan("secsvc", ""); err != nil {
+	if _, err := e2.Scan("secsvc", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	st, err = e2.Status()
@@ -409,7 +411,7 @@ func TestListenProc(t *testing.T) {
 		calls++
 		return listenFixture("0100007F:0016"), "", false, nil
 	}
-	found, err := e.Scan("secsvc", "")
+	found, err := e.Scan("secsvc", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +428,7 @@ func TestListenProc(t *testing.T) {
 	e.Proc = func() (string, string, bool, error) {
 		return listenFixture("0100007F:0050"), "", false, nil
 	}
-	found, err = e.Scan("secsvc", "")
+	found, err = e.Scan("secsvc", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -669,7 +671,7 @@ func TestAuthEdge(t *testing.T) {
 	if err := e.PutConfig("actor", "lease-auth", expAt(), body, coverAll); err != nil {
 		t.Fatal(err)
 	}
-	found, err := e.Scan("secsvc", "")
+	found, err := e.Scan("secsvc", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -684,14 +686,14 @@ func TestAuthEdge(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	found, err = e.Scan("secsvc", "")
+	found, err = e.Scan("secsvc", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(found) != 1 || found[0].Kind != ids.KindAuth || !strings.Contains(found[0].Summary, "9.9.9.9") {
 		t.Fatalf("auth %+v", found)
 	}
-	if _, err := e.Scan("secsvc", ""); err != nil {
+	if _, err := e.Scan("secsvc", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	if countAction(actions(t, e), "ids.finding") != 1 {
@@ -704,14 +706,14 @@ func TestDropWatchResolves(t *testing.T) {
 	p := filepath.Join(dir, "u")
 	writeFile(t, p, "u")
 	putJSON(t, e, "lease-u", map[string]any{"watch": []string{p}}, coverAll)
-	if _, err := e.Scan("secsvc", ""); err != nil {
+	if _, err := e.Scan("secsvc", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	body, _ := json.Marshal(map[string]any{"watch": []string{}})
 	if err := e.PutConfig("actor", "lease-drop", expAt(), body, coverAll); err != nil {
 		t.Fatal(err)
 	}
-	found, err := e.Scan("secsvc", "")
+	found, err := e.Scan("secsvc", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -751,7 +753,7 @@ func TestFIFOStatusAndScanDoNotBlock(t *testing.T) {
 	done := make(chan Status, 1)
 	go func() {
 		st, _ := e.Status()
-		if _, err := e.Scan("secsvc", ""); err != nil {
+		if _, err := e.Scan("secsvc", "", 0); err != nil {
 			t.Error(err)
 		}
 		done <- st

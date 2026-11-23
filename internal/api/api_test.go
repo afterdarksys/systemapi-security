@@ -488,10 +488,24 @@ func TestScanAndBaseline(t *testing.T) {
 	if errOf(t, rec) != codes.BadPath {
 		t.Fatal(errOf(t, rec))
 	}
+	// The baseline spent lease-base1, so a scan on the same grant is refused.
 	rec = call(f.srv, http.MethodPost, "/v1/scan", g, "")
+	shell(t, rec, http.StatusForbidden)
+	if errOf(t, rec) != codes.GrantSpent {
+		t.Fatal(errOf(t, rec))
+	}
+	sg := f.sign(t, grant.Grant{
+		Purpose: grant.PurposeOperate, Entitlements: []string{grant.EntScan}, LeaseID: "lease-scan1",
+	})
+	rec = call(f.srv, http.MethodPost, "/v1/scan", sg, "")
 	shell(t, rec, http.StatusOK)
 	if !bytes.Contains(rec.Body.Bytes(), []byte(`"findings":[]`)) {
 		t.Fatal(rec.Body.String())
+	}
+	rec = call(f.srv, http.MethodPost, "/v1/scan", sg, "")
+	shell(t, rec, http.StatusForbidden)
+	if errOf(t, rec) != codes.GrantSpent {
+		t.Fatal(errOf(t, rec))
 	}
 	rec = call(f.srv, http.MethodGet, "/v1/findings", g, "")
 	shell(t, rec, http.StatusOK)

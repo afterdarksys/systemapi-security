@@ -41,7 +41,7 @@ func TestModuleLifecycleReportAndRestart(t *testing.T) {
 	if err != nil || !r.ConfigChanged || r.System.Platform.State != "pending" {
 		t.Fatalf("%+v %v", r, err)
 	}
-	found, err := e.Scan("ops", "")
+	found, err := e.Scan("ops", "", 0)
 	if err != nil || len(found) != 2 {
 		t.Fatalf("%+v %v", found, err)
 	}
@@ -57,7 +57,7 @@ func TestModuleLifecycleReportAndRestart(t *testing.T) {
 	// A failed check retains previous positives even when its readable files look fixed.
 	fixture.files["/etc/passwd"] = "root:x:0:0::/root:/bin/sh\n"
 	fixture.fail = true
-	if _, err = e.Scan("ops", ""); err != nil {
+	if _, err = e.Scan("ops", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	r, _ = e.Report()
@@ -75,7 +75,7 @@ func TestModuleLifecycleReportAndRestart(t *testing.T) {
 	}
 	// Complete healthy scan resolves positives.
 	fixture.fail = false
-	if _, err = e.Scan("ops", ""); err != nil {
+	if _, err = e.Scan("ops", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	r, _ = e.Report()
@@ -87,7 +87,7 @@ func TestModuleLifecycleReportAndRestart(t *testing.T) {
 	}
 	// Reintroduce a finding, then explicitly disable: this is withdrawal, not repair.
 	fixture.files["/etc/passwd"] += "evil:x:0:0::/root:/bin/sh\n"
-	if _, err = e.Scan("ops", ""); err != nil {
+	if _, err = e.Scan("ops", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	putJSON(t, e, "module-disable", store.Config{}, coverAll)
@@ -95,7 +95,7 @@ func TestModuleLifecycleReportAndRestart(t *testing.T) {
 	if !r.ConfigChanged || r.Findings[0].Observation != "stale" {
 		t.Fatal("config change not visible")
 	}
-	if _, err = e.Scan("ops", ""); err != nil {
+	if _, err = e.Scan("ops", "", 0); err != nil {
 		t.Fatal(err)
 	}
 	if countAction(actions(t, e), "ids.withdrawn") != 2 {
