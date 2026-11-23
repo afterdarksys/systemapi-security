@@ -2,6 +2,9 @@ package audit
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -492,5 +495,128 @@ func TestAnchorBadShape(t *testing.T) {
 	}
 	if _, err := VerifyFile(path); codes.Code(err) != codes.AuditBad {
 		t.Fatalf("symlink anchor: %v", err)
+	}
+}
+
+// forgeRow appends a row with a correctly recomputed hash, as a forger would.
+func forgeRow(t *testing.T, path string, seq int64, prev string) string {
+	t.Helper()
+	b := body{Seq: seq, Prev: prev, Time: "2026-01-01T00:00:00Z", Actor: "evil", Action: "config.set", Detail: json.RawMessage(`{}`)}
+	raw, err := codes.Marshal(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	hash := hex.EncodeToString(sum[:])
+	line, err := codes.Marshal(stored{body: b, Hash: hash})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	return hash
+}
+
+// Inside a running chain the daemon is the only writer: a forged row past
+// what it wrote is not adopted, even within load's one-row crash allowance.
+func TestReadAllRefusesForeignTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	c, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(int64(i), 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	forgeRow(t, path, 4, c.prev)
+	if rows, err := c.ReadAll(); codes.Code(err) != codes.AuditTruncated {
+		t.Fatalf("adopted forged tail: %d rows %v", len(rows), err)
+	}
+}
+
+// A tail row rewritten in place (same seq, new hash, anchor rewritten to
+// match) is caught by the hash half of the runtime check.
+func TestReadAllRefusesRewrittenTail(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	c, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(int64(i), 0)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, err := c.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.SplitAfter(string(raw), "\n")
+	if err := os.WriteFile(path, []byte(lines[0]+lines[1]), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hash := forgeRow(t, path, 3, rows[1].Hash)
+	if err := writeHead(HeadPath(path), anchor{Seq: 3, Hash: hash}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyFile(path); err != nil {
+		t.Fatalf("forgery should verify on disk: %v", err)
+	}
+	if _, err := c.ReadAll(); codes.Code(err) != codes.AuditTruncated {
+		t.Fatalf("rewritten tail: %v", err)
+	}
+}
+
+// The daemon writes the first row before the anchor; verify retries over
+// that window, and still reports a lag that does not resolve.
+func TestVerifyRetriesAnchorLag(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.jsonl")
+	c, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	head := HeadPath(path)
+	good, err := os.ReadFile(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(head); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { verifyRetry = nil })
+	calls := 0
+	verifyRetry = func(int) {
+		calls++
+		if err := os.WriteFile(head, good, 0o600); err != nil {
+			t.Error(err)
+		}
+	}
+	if n, err := VerifyFile(path); err != nil || n != 1 || calls != 1 {
+		t.Fatalf("lag that resolves: %d %v calls=%d", n, err, calls)
+	}
+	if err := os.Remove(head); err != nil {
+		t.Fatal(err)
+	}
+	calls = 0
+	verifyRetry = func(int) { calls++ }
+	if _, err := VerifyFile(path); codes.Code(err) != codes.AuditTruncated || calls != 2 {
+		t.Fatalf("lag that persists: %v calls=%d", err, calls)
 	}
 }

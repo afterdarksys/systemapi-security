@@ -154,6 +154,9 @@ func Anchor(path string, now time.Time) (int, error) {
 	return len(rows) + 1, nil
 }
 
+// verifyRetry is a test hook called before each VerifyFile retry.
+var verifyRetry func(attempt int)
+
 // VerifyFile checks the chain against its anchor and returns the row count.
 // A missing chain with no anchor is empty. It never writes. A running daemon
 // writes the row before the anchor, so a reader in another process retries a
@@ -166,8 +169,11 @@ func VerifyFile(path string) (int, error) {
 		if err == nil {
 			return len(rows), nil
 		}
-		if codes.Code(err) != codes.AuditTruncated {
+		if codes.Code(err) != codes.AuditTruncated || i == 2 {
 			break
+		}
+		if verifyRetry != nil {
+			verifyRetry(i)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -358,8 +364,10 @@ func (c *Chain) ReadAll() ([]Row, error) {
 		c.broken = true
 		return nil, err
 	}
-	// This chain wrote row c.seq; the file must still hold it, unchanged.
-	if c.seq > 0 && (int64(len(rows)) < c.seq || rows[c.seq-1].Hash != c.prev) {
+	// The running daemon is the only writer, so the file must hold exactly
+	// the rows this chain wrote, the last one unchanged. The one-row crash
+	// allowance in load applies only at open.
+	if int64(len(rows)) != c.seq || (c.seq > 0 && rows[c.seq-1].Hash != c.prev) {
 		c.broken = true
 		return nil, codes.E(codes.AuditTruncated)
 	}
