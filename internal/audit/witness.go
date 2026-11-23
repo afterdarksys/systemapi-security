@@ -20,10 +20,14 @@ const (
 )
 
 // Before an append, a file that would reach witnessLines witnesses or pass
-// witnessCompact bytes is compacted to at most witnessKeep of the newest,
-// in at most half of witnessCompact bytes, the new one included. A witness
-// line is under 300 bytes, so the file stays well below witnessMax, the
-// read cap, and witness growth can never make the store unopenable.
+// witnessCompact bytes is compacted to at most witnessKeep witnesses in at
+// most half of witnessCompact bytes, the new one included. Half of that
+// room goes to the highest seqs and the rest to the most recent arrivals,
+// and the kept lines stay in arrival order. Threats: a holder of a witness
+// grant who floods low-seq witnesses cannot push out the highest-seq one,
+// which is always kept. A witness line is under 300 bytes, so the file stays
+// well below witnessMax, the read cap, and witness growth can never make the
+// store unopenable.
 var (
 	witnessKeep    = 500
 	witnessLines   = 1000
@@ -195,14 +199,45 @@ func (c *Chain) AddWitness(w Witness) error {
 		size += len(olds[i]) + 1
 	}
 	if len(ws)+1 >= witnessLines || size+len(line)+1 > witnessCompact {
-		keep, kept := 0, len(line)+1
-		for i := len(olds) - 1; i >= 0 && keep+1 < witnessKeep && kept+len(olds[i])+1 <= witnessCompact/2; i-- {
+		chosen := make([]bool, len(olds))
+		keep, kept := 1, len(line)+1
+		take := func(i, maxKeep, maxBytes int) bool {
+			if chosen[i] {
+				return true
+			}
+			if keep >= maxKeep || kept+len(olds[i])+1 > maxBytes {
+				return false
+			}
+			chosen[i] = true
 			keep++
 			kept += len(olds[i]) + 1
+			return true
+		}
+		bySeq := make([]int, len(olds))
+		for i := range bySeq {
+			bySeq[i] = i
+		}
+		sort.SliceStable(bySeq, func(a, b int) bool {
+			if ws[bySeq[a]].Seq != ws[bySeq[b]].Seq {
+				return ws[bySeq[a]].Seq > ws[bySeq[b]].Seq
+			}
+			return bySeq[a] > bySeq[b]
+		})
+		for _, i := range bySeq {
+			if !take(i, (witnessKeep+1)/2, witnessCompact/4) {
+				break
+			}
+		}
+		for i := len(olds) - 1; i >= 0; i-- {
+			if !take(i, witnessKeep, witnessCompact/2) {
+				break
+			}
 		}
 		var buf bytes.Buffer
-		for _, b := range olds[len(olds)-keep:] {
-			buf.Write(append(b, '\n'))
+		for i, b := range olds {
+			if chosen[i] {
+				buf.Write(append(b, '\n'))
+			}
 		}
 		buf.Write(append(line, '\n'))
 		err = writeBytes(path, buf.Bytes())

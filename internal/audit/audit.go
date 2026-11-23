@@ -147,6 +147,8 @@ type Chain struct {
 	wit   *Witness
 	// walking counts full walks in progress; prune defers deletes meanwhile.
 	walking int
+	// pruneTo is the last segment an audit.pruned row has dropped.
+	pruneTo int
 	broken  bool
 }
 
@@ -608,19 +610,28 @@ func (c *Chain) prune(now time.Time) error {
 	if _, err := c.appendLocked("secsvc", "", "audit.pruned", detail, now); err != nil {
 		return err
 	}
-	if c.walking > 0 {
-		return nil
+	c.pruneTo = through
+	c.dropPruned()
+	return nil
+}
+
+// dropPruned deletes the segments audit.pruned rows have dropped. It waits
+// while a full walk runs, and the walk calls it when it ends, so back-to-back
+// walks cannot hold retention off until the next roll. A failed delete
+// leaves the files for the next call; they still verify.
+func (c *Chain) dropPruned() {
+	if c.walking > 0 || c.pruneTo < c.low {
+		return
 	}
-	for n := c.low; n <= through; n++ {
+	for n := c.low; n <= c.pruneTo; n++ {
 		if err := os.Remove(segPath(c.dir, n)); err != nil && !os.IsNotExist(err) {
-			return nil
+			return
 		}
 	}
 	if err := syncDir(filepath.Join(c.dir, SegDir)); err != nil {
-		return nil
+		return
 	}
-	c.low = through + 1
-	return nil
+	c.low = c.pruneTo + 1
 }
 
 // pruned is the detail of an audit.pruned row.
@@ -743,6 +754,7 @@ func (c *Chain) Verify() (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.walking--
+	c.dropPruned()
 	if err != nil {
 		c.broken = true
 		return 0, err

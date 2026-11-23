@@ -754,8 +754,9 @@ func TestVerifyWithoutLock(t *testing.T) {
 	}
 }
 
-// A prune that lands while a full walk runs leaves its files for the next
-// roll, so the walk does not see its own snapshot's segments vanish.
+// A prune that lands while a full walk runs leaves its files while the walk
+// needs them, and the end of the walk deletes them, so back-to-back walks
+// cannot hold retention off.
 func TestPruneDeferredDuringWalk(t *testing.T) {
 	dir := t.TempDir()
 	c := openChain(t, dir, small, 1)
@@ -765,18 +766,56 @@ func TestPruneDeferredDuringWalk(t *testing.T) {
 	walkHook = func() {
 		walkHook = nil
 		appendN(t, c, 7) // rolls, and each roll prunes
+		if _, err := os.Stat(oldest); err != nil {
+			t.Error("deleted during the walk")
+		}
 	}
 	if _, err := c.Verify(); err != nil {
 		t.Fatalf("walk during prune: %v", err)
 	}
-	if _, err := os.Stat(oldest); err != nil {
-		t.Fatal("deleted during the walk")
-	}
-	appendN(t, c, 6) // the next roll deletes what was deferred
 	if _, err := os.Stat(oldest); !os.IsNotExist(err) {
-		t.Fatal("deferred delete never ran")
+		t.Fatal("the end of the walk did not delete what it deferred")
 	}
 	if _, err := c.Verify(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyDir(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A flood of low-seq witnesses cannot push the highest-seq one out.
+func TestWitnessCompactionKeepsHighestSeq(t *testing.T) {
+	defer func(l, k int) { witnessLines, witnessKeep = l, k }(witnessLines, witnessKeep)
+	witnessLines, witnessKeep = 10, 4
+	dir := t.TempDir()
+	c := openChain(t, dir, Options{}, 0)
+	appendN(t, c, 5)
+	high := witnessAt(t, c, 5)
+	if err := c.AddWitness(high); err != nil {
+		t.Fatal(err)
+	}
+	low := witnessAt(t, c, 1)
+	for i := 0; i < 3*witnessLines; i++ {
+		if err := c.AddWitness(low); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ws, err := readWitnesses(dir)
+	if err != nil || len(ws) >= witnessLines {
+		t.Fatalf("%d %v", len(ws), err)
+	}
+	found := false
+	for _, w := range ws {
+		found = found || w == high
+	}
+	if !found {
+		t.Fatalf("highest-seq witness compacted away: %+v", ws)
+	}
+	if ws[len(ws)-1] != low {
+		t.Fatal("newest arrival not last")
+	}
+	if _, err := c.ReadAll(); err != nil {
 		t.Fatal(err)
 	}
 }
