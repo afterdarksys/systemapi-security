@@ -5,7 +5,6 @@ package modules
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/afterdarksys/systemapi-security/internal/ids"
@@ -104,34 +103,6 @@ func CloneConfig(in map[string]Config) map[string]Config {
 		}
 		out[k] = v
 	}
-	return out
-}
-
-// RequiredPaths includes fixed discovery paths and all paths a selected check
-// may read. It is independent of current OS so activation cannot bypass grants.
-func RequiredPaths(cfg map[string]Config) []string {
-	set := map[string]bool{}
-	for id, c := range cfg {
-		if !c.Enabled {
-			continue
-		}
-		p, ok := profile(id)
-		if !ok {
-			continue
-		}
-		set["/etc/os-release"] = true
-		set["/usr/lib/os-release"] = true
-		for _, check := range selected(p, c) {
-			for _, path := range checkPaths(p, check) {
-				set[path] = true
-			}
-		}
-	}
-	out := make([]string, 0, len(set))
-	for p := range set {
-		out = append(out, p)
-	}
-	sort.Strings(out)
 	return out
 }
 

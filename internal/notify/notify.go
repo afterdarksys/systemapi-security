@@ -270,16 +270,14 @@ func filterPins(network string, pins []string) []string {
 	return PinTargets(network, ips)
 }
 
-// dialPinned dials the first target. A target containing "ntfy" is refused.
+// dialPinned dials the first target that answers. Targets are pinned IP:port
+// pairs, already checked by blocked.
 func dialPinned(ctx context.Context, network string, targets []string, dial func(context.Context, string, string) (net.Conn, error)) (net.Conn, error) {
 	if dial == nil || len(targets) == 0 {
 		return nil, codes.E(codes.BlockedAddress)
 	}
 	var first error
 	for _, addr := range targets {
-		if strings.Contains(strings.ToLower(addr), "ntfy") {
-			return nil, codes.E(codes.BlockedAddress)
-		}
 		c, err := dial(ctx, network, addr)
 		if err == nil {
 			return c, nil
@@ -341,6 +339,10 @@ func blocked(ip net.IP) bool {
 		return false
 	}
 	if len(ip) == net.IPv6len && ip[0]&0xfe == 0xfc {
+		return true
+	}
+	// 2001:db8::/32 is the IPv6 documentation range.
+	if len(ip) == net.IPv6len && ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x0d && ip[3] == 0xb8 {
 		return true
 	}
 	return false

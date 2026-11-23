@@ -6,7 +6,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
@@ -131,10 +130,7 @@ func TestUnknownConfigAndDefensiveCopies(t *testing.T) {
 
 func TestActivationAndRemovalRequirePathCoverage(t *testing.T) {
 	cfg := map[string]Config{"debian": {Enabled: true, Checks: []string{"accounts"}}}
-	paths := RequiredPaths(cfg)
-	if len(paths) != 4 {
-		t.Fatal(paths)
-	}
+	paths := []string{"/etc/os-release", "/usr/lib/os-release", "/etc/passwd", "/etc/shadow"}
 	for _, blocked := range paths {
 		covers := func(p string) bool { return p != blocked }
 		if ChangeAllowed(nil, cfg, covers) || ChangeAllowed(cfg, nil, covers) {
@@ -281,14 +277,6 @@ func TestHostReaderBoundedAndNoFollow(t *testing.T) {
 	}
 	if _, err := h.ReadFile(regular); !errors.Is(err, errOversized) {
 		t.Fatal(err)
-	}
-}
-
-func TestStableRequiredPaths(t *testing.T) {
-	cfg := map[string]Config{"ubuntu": {Enabled: true}, "rocky": {Enabled: true}}
-	a, b := RequiredPaths(cfg), RequiredPaths(cfg)
-	if !reflect.DeepEqual(a, b) {
-		t.Fatal("unstable manifest")
 	}
 }
 

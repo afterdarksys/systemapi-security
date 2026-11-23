@@ -123,7 +123,7 @@ The contact form is the same string `notices.js` accepts: `push:ntfy:https://ntf
 
 ## ntfy
 
-`http.Transport.Proxy` is `notify.NoProxy`. TLS minimum version is 1.3. `ServerName` is `ntfy.sh`. Redirects are refused. The client timeout is 5 seconds. DNS answers are pinned to public addresses; any loopback, private, link-local, CGNAT, multicast, unspecified, documentation, or benchmarking address, including `198.51.100.0/24` and `203.0.113.0/24`, is `blocked_address`. There is no allow-private switch. A response is success only for status 2xx. Logs and audit rows store the contact's SHA-256, never the topic.
+`http.Transport.Proxy` is `notify.NoProxy`. TLS minimum version is 1.3. `ServerName` is `ntfy.sh`. Redirects are refused. The client timeout is 5 seconds. DNS answers are pinned to public addresses; any loopback, private, link-local, CGNAT, multicast, unspecified, documentation, or benchmarking address, including `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, and `2001:db8::/32`, is `blocked_address`. There is no allow-private switch. A response is success only for status 2xx. Logs and audit rows store the contact's SHA-256, never the topic.
 
 `PUT /v1/contact` parses, checks egress, then spends the lease.
 
