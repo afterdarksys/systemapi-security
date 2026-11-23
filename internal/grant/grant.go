@@ -42,6 +42,7 @@ const (
 	EntNotify       = "security.notify"
 	EntRead         = "security.read"
 	EntScan         = "security.scan"
+	EntWitness      = "security.witness"
 )
 
 var (
@@ -89,9 +90,9 @@ func Ceiling(purpose string) []string {
 	case PurposeRead:
 		src = []string{EntAudit, EntRead}
 	case PurposeConfig:
-		src = []string{EntAudit, EntBaseline, EntConfig, EntNotify, EntRead}
+		src = []string{EntAudit, EntBaseline, EntConfig, EntNotify, EntRead, EntWitness}
 	case PurposeOperate:
-		src = []string{EntAudit, EntBaseline, EntConfig, EntNotify, EntRead, EntScan}
+		src = []string{EntAudit, EntBaseline, EntConfig, EntNotify, EntRead, EntScan, EntWitness}
 	default:
 		return nil
 	}

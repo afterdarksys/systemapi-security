@@ -4,13 +4,16 @@
 // A group- or world-readable contact, a symlink, or a corrupt state file fails
 // closed and the contact bytes are not returned. Config, baseline, and lease
 // writes are atomic. A lease is recorded before the caller's commit and stays
-// spent when that commit fails. This package does not verify grants and does
+// spent when that commit fails. The audit anchor key is created once with
+// O_EXCL at mode 0600, is never returned or printed, and a loose mode on it
+// fails closed with seed_perms. This package does not verify grants and does
 // not parse the contact grammar; the caller supplies that check. Parent-directory
 // symlinks are out of scope.
 package store
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -40,10 +43,15 @@ const (
 	edgeMaxLines = 500
 	watchMax     = 64
 	listenMax    = 64
+	keepMax      = 1_000_000
+	anchorKey    = "anchor.key"
 
 	defFailLimit = 5
 	defWindowS   = 300
 )
+
+// auditOptions caps audit segments; tests shrink it.
+var auditOptions audit.Options
 
 // ErrNone means no contact is configured. It is not a codes.Error.
 var ErrNone = errors.New("none")
@@ -56,6 +64,10 @@ type Config struct {
 	AuthWindowS   int                       `json:"auth_window_s"`
 	Watch         []string                  `json:"watch"`
 	ListenAllow   []string                  `json:"listen_allow"`
+	// AuditKeepSegments is how many closed audit segments are kept; 0 keeps all.
+	AuditKeepSegments int `json:"audit_keep_segments,omitempty"`
+	// PageDetail puts host, path and address detail back into pages.
+	PageDetail bool `json:"page_detail,omitempty"`
 }
 
 // ConfigView is the GET body. ContactSHA256 is a fingerprint, never the URL.
@@ -66,6 +78,8 @@ type ConfigView struct {
 	AuthWindowS   int                       `json:"auth_window_s"`
 	Watch         []string                  `json:"watch"`
 	ListenAllow   []string                  `json:"listen_allow"`
+	AuditKeep     int                       `json:"audit_keep_segments"`
+	PageDetail    bool                      `json:"page_detail"`
 	ContactSHA256 string                    `json:"contact_sha256"`
 	ContactState  string                    `json:"contact_state"`
 }
@@ -110,6 +124,7 @@ type Store struct {
 	ids     IDSState
 	spent   map[string]int64
 	chain   *audit.Chain
+	key     ed25519.PrivateKey
 	contact string
 	hasC    bool
 }
@@ -151,10 +166,15 @@ func Open(dir string, parse func(string) error) (*Store, error) {
 	if err := s.checkEdges(); err != nil {
 		return nil, err
 	}
-	chain, err := audit.Open(filepath.Join(dir, "audit.jsonl"))
+	chain, err := audit.Open(dir, auditOptions, cfg.AuditKeepSegments)
 	if err != nil {
 		return nil, err
 	}
+	key, err := loadAnchorKey(dir)
+	if err != nil {
+		return nil, err
+	}
+	s.key = key
 	s.cfg = cfg
 	s.base = base
 	s.ids = st
@@ -164,6 +184,61 @@ func Open(dir string, parse func(string) error) (*Store, error) {
 	s.hasC = ok
 	return s, nil
 }
+
+// loadAnchorKey reads anchor.key, or creates it at the first start.
+// Threats: the key signs audit heads for an off-host party, so it is created
+// with O_EXCL|O_NOFOLLOW at mode 0600 and fsynced, is read only from a
+// regular file with no group or other bits (seed_perms otherwise), and is
+// never returned, logged or printed; only the public key leaves the store.
+// Root can still read it: the head signature proves which key signed, not
+// that root did not.
+func loadAnchorKey(dir string) (ed25519.PrivateKey, error) {
+	path := filepath.Join(dir, anchorKey)
+	fi, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		_, priv, gerr := ed25519.GenerateKey(rand.Reader)
+		if gerr != nil {
+			return nil, codes.E(codes.Failed)
+		}
+		f, oerr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+		if oerr != nil {
+			return nil, codes.E(codes.Failed)
+		}
+		_, werr := f.Write(priv.Seed())
+		serr := f.Sync()
+		cerr := f.Close()
+		if werr != nil || serr != nil || cerr != nil || syncDir(dir) != nil {
+			os.Remove(path)
+			return nil, codes.E(codes.Failed)
+		}
+		return priv, nil
+	}
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
+		return nil, codes.E(codes.Failed)
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return nil, codes.E(codes.SeedPerms)
+	}
+	b, err := readUpTo(path, ed25519.SeedSize+1)
+	if err != nil || len(b) != ed25519.SeedSize {
+		return nil, codes.E(codes.Failed)
+	}
+	return ed25519.NewKeyFromSeed(b), nil
+}
+
+// AnchorPub is the public half of the audit anchor key.
+func (s *Store) AnchorPub() ed25519.PublicKey {
+	pub, _ := s.key.Public().(ed25519.PublicKey)
+	return pub
+}
+
+// SignAnchor signs msg with the anchor key. The caller adds the domain.
+func (s *Store) SignAnchor(msg []byte) []byte {
+	return ed25519.Sign(s.key, msg)
+}
+
+// Dir is the state directory.
+func (s *Store) Dir() string { return s.dir }
 
 // Lock takes a POSIX write lock on dir/lock and returns its descriptor.
 // Closing the descriptor releases it. Another process holding it is
@@ -243,6 +318,7 @@ func (s *Store) View() (ConfigView, error) {
 		Modules: modules.CloneConfig(s.cfg.Modules),
 		AuthLog: s.cfg.AuthLog, AuthFailLimit: s.cfg.AuthFailLimit, AuthWindowS: s.cfg.AuthWindowS,
 		Watch: append([]string(nil), s.cfg.Watch...), ListenAllow: append([]string(nil), s.cfg.ListenAllow...),
+		AuditKeep: s.cfg.AuditKeepSegments, PageDetail: s.cfg.PageDetail,
 		ContactState: "off",
 	}
 	if v.Watch == nil {
@@ -295,6 +371,9 @@ func (s *Store) PutConfig(c Config) error {
 		return codes.E(codes.Failed)
 	}
 	if err := writeAtomic(s.dir, "config.json", append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	if err := s.chain.SetKeep(norm.AuditKeepSegments); err != nil {
 		return err
 	}
 	s.cfg = norm
@@ -385,14 +464,16 @@ func (s *Store) AppendAudit(actor, lease, action string, detail json.RawMessage,
 	return s.chain.Append(actor, lease, action, detail, now)
 }
 
-// AuditTail returns the last limit rows after a fresh verify.
+// AuditTail returns the last limit rows of the newest segment after the
+// bounded runtime check.
 func (s *Store) AuditTail(limit int) ([]audit.Row, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.chain.Tail(limit)
 }
 
-// AuditCount re-verifies the chain. A failure marks it broken.
+// AuditCount is the bounded runtime check; it returns the rows in the
+// newest segment. A failure marks the chain broken.
 func (s *Store) AuditCount() (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -401,6 +482,27 @@ func (s *Store) AuditCount() (int, error) {
 		return 0, err
 	}
 	return len(rows), nil
+}
+
+// AuditVerify walks every segment and returns the rows on disk.
+func (s *Store) AuditVerify() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.chain.Verify()
+}
+
+// AuditHead is the last seq, hash and segment after the runtime check.
+func (s *Store) AuditHead() (int64, string, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.chain.Head()
+}
+
+// AddWitness stores a witness the chain matches.
+func (s *Store) AddWitness(w audit.Witness) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.chain.AddWitness(w)
 }
 
 // AppendEdge records one finding edge. A huge or long file keeps the tail.
@@ -497,6 +599,9 @@ func Normalize(c Config) (Config, error) {
 	c.AuthWindowS, err = normLimit(c.AuthWindowS, defWindowS, 1, 3600)
 	if err != nil {
 		return Config{}, err
+	}
+	if c.AuditKeepSegments < 0 || c.AuditKeepSegments > keepMax {
+		return Config{}, codes.E(codes.BadPath)
 	}
 	if c.AuthLog != "" && (!paths.IsAbsClean(c.AuthLog) || paths.IsRoot(c.AuthLog)) {
 		return Config{}, codes.E(codes.BadPath)

@@ -189,7 +189,7 @@ func TestIntegrityEdgesAndQuietRepeat(t *testing.T) {
 	if got := actions(t, e); len(got) != len(acts) {
 		t.Fatalf("quiet scan grew audit %v", got)
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
+	raw, err := os.ReadFile(filepath.Join(dir, "audit", "000001.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +357,7 @@ func TestSymlinkWatchIsNotFollowed(t *testing.T) {
 	if len(found) != 1 || found[0].Kind != ids.KindLink || found[0].Summary != "symlink" {
 		t.Fatalf("finding %+v", found)
 	}
-	raw, _ := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
+	raw, _ := os.ReadFile(filepath.Join(dir, "audit", "000001.jsonl"))
 	if bytes.Contains(raw, []byte("SECRETSECRET")) {
 		t.Fatal("followed symlink")
 	}
@@ -582,7 +582,7 @@ func TestCapabilityReport(t *testing.T) {
 	if err := e.Store.AppendAudit("secsvc", "lease-cap4", "scan", nil, frozen); err != nil {
 		t.Fatal(err)
 	}
-	chain := filepath.Join(dir, "audit.jsonl")
+	chain := filepath.Join(dir, "audit", "000001.jsonl")
 	b, err := os.ReadFile(chain)
 	if err != nil {
 		t.Fatal(err)
@@ -765,7 +765,7 @@ func TestAuditCapTruncated(t *testing.T) {
 	if err := e.Store.AppendAudit("secsvc", "lease-trunc", "scan", nil, frozen); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "audit.jsonl"), nil, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "audit", "000001.jsonl"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	st, err := e.Status()

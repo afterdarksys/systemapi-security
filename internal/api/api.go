@@ -49,6 +49,8 @@ const (
 	defaultAuditLimit = 50
 	maxAuditLimit     = 200
 	readyEnv          = "SAHINIT_READY_FD"
+	// verifyEvery is the least time between two full verifies.
+	verifyEvery = time.Minute
 )
 
 // Server verifies grants and calls the engine. It does not start the scan loop.
@@ -57,6 +59,9 @@ type Server struct {
 	Pub  ed25519.PublicKey
 	Eng  *engine.Engine
 	Now  func() time.Time
+
+	verifyMu   sync.Mutex
+	lastVerify time.Time
 }
 
 type route struct {
@@ -117,6 +122,8 @@ func routeTable() []route {
 	rows := []route{
 		{http.MethodGet, "/v1/audit", grant.EntAudit},
 		{http.MethodGet, "/v1/audit/verify", grant.EntAudit},
+		{http.MethodGet, "/v1/audit/head", grant.EntAudit},
+		{http.MethodPost, "/v1/audit/witness", grant.EntWitness},
 		{http.MethodPost, "/v1/baseline", grant.EntBaseline},
 		{http.MethodGet, "/v1/catalog", grant.EntRead},
 		{http.MethodGet, "/v1/config", grant.EntRead},
@@ -225,6 +232,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.audit(w, limit)
 	case "/v1/audit/verify":
 		s.verify(w)
+	case "/v1/audit/head":
+		s.writeCall(w, func() (any, error) { return s.Eng.AuditHead() })
+	case "/v1/audit/witness":
+		body, err := readBody(w, r)
+		if err != nil {
+			writeCode(w, err)
+			return
+		}
+		if err := s.Eng.Witness(g.Actor, g.LeaseID, g.Exp, body); err != nil {
+			writeCode(w, err)
+			return
+		}
+		writeOK(w)
 	default:
 		writeErr(w, codes.Failed)
 	}
@@ -351,7 +371,19 @@ func (s *Server) audit(w http.ResponseWriter, limit int) {
 	}{out})
 }
 
+// verify is the full walk. Threats: it reads every segment while holding the
+// engine lock, so one authorized caller could stall scans by looping it; a
+// second call within verifyEvery is rate_limited (429) before any read.
 func (s *Server) verify(w http.ResponseWriter) {
+	s.verifyMu.Lock()
+	now := s.now()
+	if !s.lastVerify.IsZero() && now.Sub(s.lastVerify) < verifyEvery && !now.Before(s.lastVerify) {
+		s.verifyMu.Unlock()
+		writeErr(w, codes.RateLimited)
+		return
+	}
+	s.lastVerify = now
+	s.verifyMu.Unlock()
 	n, err := s.Eng.VerifyAudit()
 	if err != nil {
 		writeCode(w, err)
@@ -459,6 +491,8 @@ func statusOf(code string) int {
 		return http.StatusForbidden
 	case codes.Method:
 		return http.StatusMethodNotAllowed
+	case codes.RateLimited:
+		return http.StatusTooManyRequests
 	default:
 		return http.StatusInternalServerError
 	}

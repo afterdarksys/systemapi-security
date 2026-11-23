@@ -449,14 +449,14 @@ func TestConfigContactAndAudit(t *testing.T) {
 	if sets != 1 {
 		t.Fatalf("notify.set %d", sets)
 	}
-	disk, err := os.ReadFile(filepath.Join(f.dir, "audit.jsonl"))
+	disk, err := os.ReadFile(filepath.Join(f.dir, "audit", "000001.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bytes.Contains(disk, []byte(topic)) || bytes.Contains(disk, []byte("ntfy.sh")) {
 		t.Fatal("topic in audit")
 	}
-	if err := os.WriteFile(filepath.Join(f.dir, "audit.jsonl"), []byte("tampered\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(f.dir, "audit", "000001.jsonl"), []byte("tampered\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	rec = call(f.srv, http.MethodGet, "/v1/audit", op, "")

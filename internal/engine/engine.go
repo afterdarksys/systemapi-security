@@ -12,6 +12,8 @@ package engine
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -49,6 +51,8 @@ type Status struct {
 	Listen        string           `json:"listen"`
 	OpenFindings  int              `json:"open_findings"`
 	Caps          []caps.Result    `json:"caps"`
+	// AnchorPub is the hex public key that signs GET /v1/audit/head.
+	AnchorPub string `json:"anchor_pub"`
 }
 
 // Armed reports which detectors have a target configured.
@@ -123,8 +127,9 @@ func (e *Engine) Status() (Status, error) {
 	return Status{
 		Host: e.Host, LastScan: st.LastScan, Listen: listen, OpenFindings: len(st.Open),
 		System: systemView(cfg, st), ConfigChanged: configHash(cfg) != st.ConfigSHA256,
-		Armed: Armed{Auth: cfg.AuthLog != "", Integrity: len(cfg.Watch) > 0, Listen: len(cfg.ListenAllow) > 0},
-		Caps:  caps.Probe(e.capEnv(cfg)),
+		Armed:     Armed{Auth: cfg.AuthLog != "", Integrity: len(cfg.Watch) > 0, Listen: len(cfg.ListenAllow) > 0},
+		Caps:      caps.Probe(e.capEnv(cfg)),
+		AnchorPub: hex.EncodeToString(e.Store.AnchorPub()),
 	}, nil
 }
 
@@ -146,7 +151,7 @@ func (e *Engine) auditCheck() error {
 	if err == nil {
 		return nil
 	}
-	if c := codes.Code(err); c == codes.AuditBad || c == codes.AuditTruncated {
+	if c := codes.Code(err); c == codes.AuditBad || c == codes.AuditTruncated || c == codes.AuditLayout {
 		return caps.ErrAudit
 	}
 	return caps.ErrProbe
@@ -274,18 +279,83 @@ func (e *Engine) Config() (store.ConfigView, error) {
 	return e.Store.View()
 }
 
-// Audit returns the tail after a fresh verify.
+// Audit returns the tail of the newest segment after the bounded check.
 func (e *Engine) Audit(limit int) ([]audit.Row, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.Store.AuditTail(limit)
 }
 
-// VerifyAudit re-verifies the chain and returns the row count.
+// VerifyAudit walks every segment and returns the rows on disk. It holds
+// the engine lock for the walk, so the API rate-limits it.
 func (e *Engine) VerifyAudit() (int, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.Store.AuditCount()
+	return e.Store.AuditVerify()
+}
+
+// HeadDomain prefixes every signed head, so an anchor signature can never be
+// replayed as a grant or anything else the key might sign.
+const HeadDomain = "secsvc-audit-head-v1\n"
+
+// Head is the chain position an off-host party records.
+type Head struct {
+	Host    string `json:"host"`
+	Seq     int64  `json:"seq"`
+	Hash    string `json:"hash"`
+	Segment int    `json:"segment"`
+	Time    string `json:"time"`
+}
+
+// SignedHead is the GET /v1/audit/head body. Sig is base64 Ed25519 over
+// HeadDomain followed by the compact JSON of Head.
+type SignedHead struct {
+	Head Head   `json:"head"`
+	Sig  string `json:"sig"`
+}
+
+// AuditHead signs the head after the bounded runtime check.
+// Threats: a truncated or rewritten newest segment is refused before
+// anything is signed. The anchor key never leaves the store. Root on this
+// host holds the key too, so a signed head proves only what this host said
+// and when; the witnessing party must keep its own copies.
+func (e *Engine) AuditHead() (SignedHead, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	seq, hash, seg, err := e.Store.AuditHead()
+	if err != nil {
+		return SignedHead{}, err
+	}
+	h := Head{Host: e.Host, Seq: seq, Hash: hash, Segment: seg, Time: e.now().UTC().Format(time.RFC3339Nano)}
+	b, err := codes.Marshal(h)
+	if err != nil {
+		return SignedHead{}, codes.E(codes.Failed)
+	}
+	sig := e.Store.SignAnchor(append([]byte(HeadDomain), b...))
+	return SignedHead{Head: h, Sig: base64.StdEncoding.EncodeToString(sig)}, nil
+}
+
+// Witness stores an off-host witness record and audits it.
+// Threats: the body is strict; the lease is spent before the commit; a
+// witness the chain does not hold is audit_truncated and breaks the chain.
+func (e *Engine) Witness(actor, lease string, exp int64, body []byte) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	w, err := audit.ParseWitness(body)
+	if err != nil {
+		return err
+	}
+	detail, err := mustDetail(w)
+	if err != nil {
+		return err
+	}
+	if err := e.Store.Spend(lease, exp, e.now()); err != nil {
+		return err
+	}
+	if err := e.Store.AddWitness(w); err != nil {
+		return err
+	}
+	return e.Store.AppendAudit(actor, lease, "audit.witness", detail, e.now())
 }
 
 // PutConfig replaces configuration when covers allows every changed path.
@@ -298,6 +368,9 @@ func (e *Engine) PutConfig(actor, lease string, exp int64, body []byte, covers f
 	}
 	old := e.Store.Config()
 	if err := store.AllowChange(old, neu, covers); err != nil {
+		return err
+	}
+	if err := stateScope(old, neu, e.Store.Dir(), covers); err != nil {
 		return err
 	}
 	if err := store.ProbePaths(neu); err != nil {
@@ -315,6 +388,21 @@ func (e *Engine) PutConfig(actor, lease string, exp int64, body []byte, covers f
 	}
 	if err := e.Store.AppendAudit(actor, lease, "config.set", detail, e.now()); err != nil {
 		return err
+	}
+	return nil
+}
+
+// stateScope guards the fields that govern the state directory itself.
+// Threats: audit_keep_segments deletes audit history and page_detail sends
+// every subject to the contact, so a grant scoped to one watched path must
+// not change either; a change needs a grant that covers the state directory,
+// otherwise config_scope.
+func stateScope(old, neu store.Config, dir string, covers func(string) bool) error {
+	if old.AuditKeepSegments == neu.AuditKeepSegments && old.PageDetail == neu.PageDetail {
+		return nil
+	}
+	if covers == nil || !covers(dir) {
+		return codes.E(codes.ConfigScope)
 	}
 	return nil
 }

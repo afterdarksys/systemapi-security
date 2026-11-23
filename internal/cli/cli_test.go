@@ -154,7 +154,10 @@ func TestAuditVerify(t *testing.T) {
 	if c := Main([]string{"audit", "verify", "--dir", dir}); c != 0 || errb.Len() != 0 || out.String() != `{"ok":true,"rows":0}`+"\n" {
 		t.Fatalf("%d %q %q", c, errb.String(), out.String())
 	}
-	if err := os.WriteFile(filepath.Join(dir, "audit.jsonl"), []byte("tampered\n"), 0o600); err != nil {
+	if err := os.Mkdir(filepath.Join(dir, audit.SegDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, audit.SegDir, "000001.jsonl"), []byte("tampered\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	want(t, out, errb, []string{"audit", "verify", "--dir", dir}, 1, "audit_bad\n")
@@ -454,32 +457,43 @@ func TestHelperHoldStore(t *testing.T) {
 	io.Copy(io.Discard, os.Stdin)
 }
 
-func TestAuditAnchor(t *testing.T) {
-	out, errb := capture(t)
-	dir := t.TempDir()
-	path := filepath.Join(dir, "audit.jsonl")
-	c, err := audit.Open(path)
+// legacyChain leaves a single-file chain of n rows with no anchor in dir,
+// the layout from before segments and anchors.
+func legacyChain(t *testing.T, dir string, n int) {
+	t.Helper()
+	tmp := t.TempDir()
+	c, err := audit.Open(tmp, audit.Options{}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 2; i++ {
+	for i := 0; i < n; i++ {
 		if err := c.Append("a", "lease-0001", "config.set", nil, time.Unix(1_700_000_000, 0)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Remove(audit.HeadPath(path)); err != nil {
+	if err := os.Rename(filepath.Join(tmp, audit.SegDir, "000001.jsonl"), filepath.Join(dir, audit.LegacyName)); err != nil {
 		t.Fatal(err)
 	}
-	want(t, out, errb, []string{"audit", "verify", "--dir", dir}, 1, codes.AuditTruncated+"\n")
+}
 
-	// Another process holds the store: anchor refuses.
+func TestAuditAnchorAndMigrate(t *testing.T) {
+	out, errb := capture(t)
+	dir := t.TempDir()
+	legacyChain(t, dir, 2)
+	want(t, out, errb, []string{"audit", "verify", "--dir", dir}, 1, codes.AuditLayout+"\n")
+	// No anchor: migrate refuses rather than bless a truncated chain.
+	want(t, out, errb, []string{"audit", "migrate", "--dir", dir}, 1, codes.AuditTruncated+"\n")
+
+	// Another process holds the store: anchor and migrate refuse.
 	release := holdStore(t, dir, false)
 	want(t, out, errb, []string{"audit", "anchor", "--dir", dir}, 1, codes.StoreBusy+"\n")
+	want(t, out, errb, []string{"audit", "migrate", "--dir", dir}, 1, codes.StoreBusy+"\n")
 	release()
-	// store.Open takes the same lock, so a running daemon blocks anchor.
+	// store.Open takes the same lock, so a running daemon blocks both.
 	fresh := t.TempDir()
 	release = holdStore(t, fresh, true)
 	want(t, out, errb, []string{"audit", "anchor", "--dir", fresh}, 1, codes.StoreBusy+"\n")
+	want(t, out, errb, []string{"audit", "migrate", "--dir", fresh}, 1, codes.StoreBusy+"\n")
 	release()
 
 	out.Reset()
@@ -487,11 +501,26 @@ func TestAuditAnchor(t *testing.T) {
 	if c := Main([]string{"audit", "anchor", "--dir", dir}); c != 0 || out.String() != `{"ok":true,"rows":3}`+"\n" {
 		t.Fatalf("%d %q %q", c, out.String(), errb.String())
 	}
+	want(t, out, errb, []string{"audit", "anchor", "--dir", dir}, 1, codes.AnchorExists+"\n")
 	out.Reset()
-	if c := Main([]string{"audit", "verify", "--dir", dir}); c != 0 || out.String() != `{"ok":true,"rows":3}`+"\n" {
+	errb.Reset()
+	if c := Main([]string{"audit", "migrate", "--dir", dir}); c != 0 || out.String() != `{"ok":true,"rows":4}`+"\n" {
 		t.Fatalf("%d %q %q", c, out.String(), errb.String())
 	}
-	want(t, out, errb, []string{"audit", "anchor", "--dir", dir}, 1, codes.AnchorExists+"\n")
+	out.Reset()
+	if c := Main([]string{"audit", "verify", "--dir", dir}); c != 0 || out.String() != `{"ok":true,"rows":4}`+"\n" {
+		t.Fatalf("%d %q %q", c, out.String(), errb.String())
+	}
+	want(t, out, errb, []string{"audit", "migrate", "--dir", dir}, 1, codes.AuditLayout+"\n")
+	want(t, out, errb, []string{"audit", "anchor", "--dir", dir}, 1, codes.AuditLayout+"\n")
+	// The migrated directory opens as a store.
+	st, err := store.Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := st.AuditVerify(); err != nil || n != 4 {
+		t.Fatalf("store verify %d %v", n, err)
+	}
 }
 
 func holdStore(t *testing.T, dir string, open bool) func() {

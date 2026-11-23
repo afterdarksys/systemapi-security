@@ -17,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"regexp"
 	"syscall"
 	"time"
@@ -316,7 +315,7 @@ func callRoute(verb string) (method, path, kind string, err error) {
 }
 
 func cmdAudit(args []string) int {
-	if len(args) == 0 || (args[0] != "verify" && args[0] != "anchor") {
+	if len(args) == 0 || (args[0] != "verify" && args[0] != "anchor" && args[0] != "migrate") {
 		return fail(2, codes.Usage)
 	}
 	fs := flag.NewFlagSet("audit", flag.ContinueOnError)
@@ -330,10 +329,15 @@ func cmdAudit(args []string) int {
 		return fail(2, codes.BadDir)
 	}
 	var n int
-	if args[0] == "anchor" {
-		n, err = anchor(*dir)
-	} else {
-		n, err = audit.VerifyFile(filepath.Join(*dir, "audit.jsonl"))
+	switch args[0] {
+	case "anchor":
+		n, err = locked(*dir, audit.Anchor)
+	case "migrate":
+		n, err = locked(*dir, func(dir string, at time.Time) (int, error) {
+			return audit.Migrate(dir, audit.Options{}, at)
+		})
+	default:
+		n, err = audit.VerifyDir(*dir)
 	}
 	if err != nil {
 		code := codes.Code(err)
@@ -353,15 +357,17 @@ func cmdAudit(args []string) int {
 	return writeOut("%s\n", b)
 }
 
-// anchor anchors a chain written before audit.head existed. It holds the
-// store lock, so it refuses (store_busy) while a daemon owns the directory.
-func anchor(dir string) (int, error) {
+// locked runs an operator step on the chain (anchor a single-file chain
+// written before audit.head existed, or migrate a single-file chain into
+// segments) under the store lock, so it refuses (store_busy) while a daemon
+// owns the directory.
+func locked(dir string, fn func(string, time.Time) (int, error)) (int, error) {
 	fd, err := store.Lock(dir)
 	if err != nil {
 		return 0, err
 	}
 	defer unix.Close(fd)
-	return audit.Anchor(filepath.Join(dir, "audit.jsonl"), now())
+	return fn(dir, now())
 }
 
 func doCall(socket, method, path, doc string, body []byte) int {
