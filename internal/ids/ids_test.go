@@ -379,45 +379,6 @@ func TestIntegrityFullMode(t *testing.T) {
 	}
 }
 
-func TestUpgradeKeepsV1Fields(t *testing.T) {
-	dir := t.TempDir()
-	p := filepath.Join(dir, "f")
-	if err := os.WriteFile(p, []byte("one"), 0o640|os.ModeSetuid); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(p, 0o640|os.ModeSetuid); err != nil {
-		t.Fatal(err)
-	}
-	cur, err := Measure(p)
-	if err != nil {
-		t.Fatal(err)
-	}
-	v1 := Record{SHA256: cur.SHA256, Mode: 0o640, Size: cur.Size}
-	up := Upgrade(p, v1)
-	if up != cur {
-		t.Fatalf("upgrade %+v want %+v", up, cur)
-	}
-	if f := Check(p, &up); f.Kind != "" {
-		t.Fatal(f)
-	}
-	// A content change made before the upgrade still shows after it.
-	stale := Record{SHA256: strings.Repeat("a", 64), Mode: 0o640, Size: cur.Size}
-	if f := Check(p, ptr(Upgrade(p, stale))); f.Kind != KindChange {
-		t.Fatal(f)
-	}
-	// So does a permission change.
-	if f := Check(p, ptr(Upgrade(p, Record{SHA256: cur.SHA256, Mode: 0o600, Size: cur.Size}))); f.Kind != KindChange {
-		t.Fatal(f)
-	}
-	// An unreadable path keeps a regular type with uid and gid 0.
-	gone := Upgrade(filepath.Join(dir, "nope"), v1)
-	if gone.Mode != unix.S_IFREG|0o640 || gone.UID != 0 || gone.GID != 0 || gone.SHA256 != v1.SHA256 {
-		t.Fatalf("%+v", gone)
-	}
-}
-
-func ptr(r Record) *Record { return &r }
-
 // at is a saved position on the current file at logp.
 func at(t *testing.T, logp string, off int64) AuthPos {
 	t.Helper()

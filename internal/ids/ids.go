@@ -62,7 +62,8 @@ type Finding struct {
 }
 
 // BaselineVersion is the current baseline.json format. Version 1 recorded
-// only the permission bits; version 2 records the full mode, uid, and gid.
+// only the permission bits; version 2 records the full mode, uid, and gid. A
+// version-1 baseline is not used: it needs an explicit re-baseline.
 const BaselineVersion = 2
 
 // Record is one baselined regular file. Mode is the full st_mode: file type,
@@ -275,24 +276,6 @@ func Check(path string, base *Record) Finding {
 		return Finding{Kind: KindChange, Severity: SevHigh, Subject: path, Summary: "mode or owner changed"}
 	}
 	return Finding{}
-}
-
-// Upgrade turns a version-1 record into a current one. What version 1 held
-// (hash, size, permission bits) is kept, so a change made before the upgrade
-// still shows on the next check. What it lacked (type, setuid, setgid, sticky,
-// uid, gid) is read from the file now. An unreadable file keeps a regular
-// type and uid and gid 0, which fails closed on the next check.
-func Upgrade(path string, v1 Record) Record {
-	out := Record{SHA256: v1.SHA256, Size: v1.Size, Mode: unix.S_IFREG | v1.Mode&0o777}
-	f, st, err := openRegular(path)
-	if err != nil {
-		return out
-	}
-	f.Close()
-	out.Mode = uint32(st.Mode)&^0o777 | v1.Mode&0o777
-	out.UID = st.Uid
-	out.GID = st.Gid
-	return out
 }
 
 func oversize(path string, baselined bool) Finding {

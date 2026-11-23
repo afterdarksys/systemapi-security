@@ -107,7 +107,6 @@ type Store struct {
 	dir     string
 	cfg     Config
 	base    map[string]ids.Record
-	baseV   int
 	ids     IDSState
 	spent   map[string]int64
 	chain   *audit.Chain
@@ -133,7 +132,7 @@ func Open(dir string, parse func(string) error) (*Store, error) {
 	if err := ProbePaths(cfg); err != nil {
 		return nil, err
 	}
-	base, baseV, err := s.loadBaseline()
+	base, err := s.loadBaseline()
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +157,6 @@ func Open(dir string, parse func(string) error) (*Store, error) {
 	}
 	s.cfg = cfg
 	s.base = base
-	s.baseV = baseV
 	s.ids = st
 	s.spent = spent
 	s.chain = chain
@@ -224,14 +222,6 @@ func (s *Store) Baseline() map[string]ids.Record {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneBase(s.base)
-}
-
-// BaselineLegacy reports a version-1 baseline that the engine must upgrade
-// once, with an audit row, before comparing.
-func (s *Store) BaselineLegacy() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.baseV < ids.BaselineVersion
 }
 
 // IDS returns a copy of the detector memory.
@@ -346,7 +336,6 @@ func (s *Store) PutBaseline(m map[string]ids.Record) error {
 		return err
 	}
 	s.base = cloneBase(m)
-	s.baseV = ids.BaselineVersion
 	return nil
 }
 
@@ -724,61 +713,56 @@ type baselineFile struct {
 	Records map[string]ids.Record `json:"records"`
 }
 
-// loadBaseline returns the records and the format version. A missing file is
-// an empty current baseline.
-func (s *Store) loadBaseline() (map[string]ids.Record, int, error) {
+// loadBaseline returns the version-2 records. A missing file is empty.
+// Threats: a version-1 baseline (a bare path map, permission bits only) is
+// not compared and not upgraded, since adopting the file's current setuid,
+// uid, or gid would bless a change made before the upgrade. It loads as no
+// records, so every watched path is unbaselined until an explicit
+// POST /v1/baseline, which writes version 2 with its audit row.
+func (s *Store) loadBaseline() (map[string]ids.Record, error) {
 	b, err := readState(filepath.Join(s.dir, "baseline.json"), fileMax)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]ids.Record{}, ids.BaselineVersion, nil
+			return map[string]ids.Record{}, nil
 		}
-		return nil, 0, err
+		return nil, err
 	}
 	if len(bytes.TrimSpace(b)) == 0 {
-		return nil, 0, codes.E(codes.Failed)
+		return nil, codes.E(codes.Failed)
+	}
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(b, &probe); err != nil {
+		return nil, codes.E(codes.Failed)
+	}
+	if _, ok := probe["v"]; !ok {
+		return map[string]ids.Record{}, nil
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
-	var raw map[string]json.RawMessage
-	if err := dec.Decode(&raw); err != nil || dec.More() {
-		return nil, 0, codes.E(codes.Failed)
+	dec.DisallowUnknownFields()
+	var f struct {
+		V       int                        `json:"v"`
+		Records map[string]json.RawMessage `json:"records"`
 	}
-	version := 1
-	if _, ok := raw["v"]; ok {
-		dec := json.NewDecoder(bytes.NewReader(b))
-		dec.DisallowUnknownFields()
-		var f struct {
-			V       int                        `json:"v"`
-			Records map[string]json.RawMessage `json:"records"`
-		}
-		if err := dec.Decode(&f); err != nil || dec.More() || f.V != ids.BaselineVersion {
-			return nil, 0, codes.E(codes.Failed)
-		}
-		version = f.V
-		raw = f.Records
+	if err := dec.Decode(&f); err != nil || dec.More() || f.V != ids.BaselineVersion {
+		return nil, codes.E(codes.Failed)
 	}
-	if raw == nil {
-		raw = map[string]json.RawMessage{}
-	}
-	out := make(map[string]ids.Record, len(raw))
-	for p, msg := range raw {
+	out := make(map[string]ids.Record, len(f.Records))
+	for p, msg := range f.Records {
 		if !paths.IsAbsClean(p) || paths.IsRoot(p) {
-			return nil, 0, codes.E(codes.BadPath)
+			return nil, codes.E(codes.BadPath)
 		}
 		rd := json.NewDecoder(bytes.NewReader(msg))
 		rd.DisallowUnknownFields()
 		var rec ids.Record
 		if err := rd.Decode(&rec); err != nil || rd.More() {
-			return nil, 0, codes.E(codes.Failed)
+			return nil, codes.E(codes.Failed)
 		}
 		if !hex64(rec.SHA256) || rec.Size < 0 {
-			return nil, 0, codes.E(codes.Failed)
-		}
-		if version == 1 && (rec.Mode&^0o777 != 0 || rec.UID != 0 || rec.GID != 0) {
-			return nil, 0, codes.E(codes.Failed)
+			return nil, codes.E(codes.Failed)
 		}
 		out[p] = rec
 	}
-	return out, version, nil
+	return out, nil
 }
 
 func (s *Store) loadIDS() (IDSState, error) {

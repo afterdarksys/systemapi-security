@@ -417,11 +417,6 @@ func (e *Engine) Scan(actor, lease string, exp int64) ([]ids.Finding, error) {
 			return nil, err
 		}
 	}
-	if e.Store.BaselineLegacy() {
-		if err := e.upgradeBaseline(actor, lease, now); err != nil {
-			return nil, err
-		}
-	}
 	cfg := e.Store.Config()
 	base := e.Store.Baseline()
 	st := e.Store.IDS()
@@ -546,31 +541,6 @@ func (e *Engine) Scan(actor, lease string, exp int64) ([]ids.Finding, error) {
 		return nil, err
 	}
 	return openFindings(st), nil
-}
-
-// upgradeBaseline re-takes a version-1 baseline once, with an audit row.
-// Threats: version 1 holds only permission bits, so comparing it against a
-// full mode would page on every file or, worse, hide setuid and owner changes.
-// ids.Upgrade keeps the old hash, size, and permission bits, so a change made
-// before the upgrade is still a finding.
-func (e *Engine) upgradeBaseline(actor, lease string, now time.Time) error {
-	old := e.Store.Baseline()
-	m := make(map[string]ids.Record, len(old))
-	for p, rec := range old {
-		m[p] = ids.Upgrade(p, rec)
-	}
-	detail, err := mustDetail(struct {
-		From  int `json:"from"`
-		To    int `json:"to"`
-		Paths int `json:"paths"`
-	}{1, ids.BaselineVersion, len(m)})
-	if err != nil {
-		return err
-	}
-	if err := e.Store.PutBaseline(m); err != nil {
-		return err
-	}
-	return e.Store.AppendAudit(actor, lease, "baseline.upgraded", detail, now)
 }
 
 func (e *Engine) auditFinding(actor, lease, action string, f ids.Finding, now time.Time) error {

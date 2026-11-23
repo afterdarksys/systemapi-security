@@ -393,28 +393,26 @@ func TestBaselineVersions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !s.BaselineLegacy() || s.Baseline()["/var/lib/a"].Mode != 0o644 {
-		t.Fatalf("v1 not legacy: %+v", s.Baseline())
+	if len(s.Baseline()) != 0 {
+		t.Fatalf("v1 records used: %+v", s.Baseline())
 	}
-	if err := s.PutBaseline(s.Baseline()); err != nil {
+	rec := ids.Record{SHA256: hexOK(), Mode: 0o100644, Size: 1}
+	if err := s.PutBaseline(map[string]ids.Record{"/var/lib/a": rec}); err != nil {
 		t.Fatal(err)
-	}
-	if s.BaselineLegacy() {
-		t.Fatal("still legacy after put")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil || !bytes.HasPrefix(raw, []byte(`{"v":2,"records":{`)) {
 		t.Fatalf("%s %v", raw, err)
 	}
 	s, err = Open(dir, nil)
-	if err != nil || s.BaselineLegacy() {
-		t.Fatalf("reopen %v", err)
+	if err != nil || s.Baseline()["/var/lib/a"] != rec {
+		t.Fatalf("reopen %v %+v", err, s.Baseline())
 	}
 	for name, body := range map[string]string{
 		"v3":        `{"v":3,"records":{}}`,
 		"v1 tagged": `{"v":1,"records":{}}`,
 		"extra":     `{"v":2,"records":{},"x":1}`,
-		"v1 suid":   `{"/var/lib/a":{"sha256":"` + hexOK() + `","mode":2541,"size":1}}`,
+		"not json":  `nope`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

@@ -809,22 +809,20 @@ func TestFIFOStatusAndScanDoNotBlock(t *testing.T) {
 	}
 }
 
-func TestLegacyBaselineUpgradedOnce(t *testing.T) {
+// A v1 baseline is not compared or upgraded: every path is unbaselined until
+// an explicit re-baseline, and a setuid bit present then is never blessed.
+func TestV1BaselineNeedsRebaseline(t *testing.T) {
 	dir := t.TempDir()
-	same := filepath.Join(dir, "same")
-	changed := filepath.Join(dir, "changed")
-	writeFile(t, same, "s")
-	writeFile(t, changed, "new")
-	if err := os.Chmod(same, os.ModeSetuid|0o644); err != nil {
+	p := filepath.Join(dir, "w")
+	writeFile(t, p, "s")
+	if err := os.Chmod(p, os.ModeSetuid|0o644); err != nil {
 		t.Fatal(err)
 	}
-	v1 := `{"` + same + `":{"sha256":"` + sha256Hex("s") + `","mode":420,"size":1},"` +
-		changed + `":{"sha256":"` + sha256Hex("old") + `","mode":420,"size":3}}` + "\n"
+	v1 := `{"` + p + `":{"sha256":"` + sha256Hex("s") + `","mode":420,"size":1}}` + "\n"
 	if err := os.WriteFile(filepath.Join(dir, "baseline.json"), []byte(v1), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := `{"watch":["` + same + `","` + changed + `"]}` + "\n"
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(cfg), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"watch":["`+p+`"]}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	st, err := store.Open(dir, nil)
@@ -836,25 +834,25 @@ func TestLegacyBaselineUpgradedOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(found) != 1 || found[0].Subject != changed || found[0].Kind != ids.KindChange {
+	if len(found) != 1 || found[0].Kind != ids.KindBase {
 		t.Fatalf("found %+v", found)
 	}
-	if _, err := e.Scan("secsvc", "", 0); err != nil {
-		t.Fatal(err)
-	}
-	if n := countAction(actions(t, e), "baseline.upgraded"); n != 1 {
-		t.Fatalf("upgrade rows %d", n)
-	}
-	// The setuid bit was adopted at upgrade; clearing it is now a change.
-	if err := os.Chmod(same, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	found, err = e.Scan("secsvc", "", 0)
+	status, err := e.Status()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(found) != 2 {
-		t.Fatalf("found %+v", found)
+	if c := capBy(status, "integrity"); c.State != caps.StateDegraded || c.Reason != caps.ReasonUnbaselined {
+		t.Fatalf("integrity %+v", c)
+	}
+	if err := e.Baseline("actor", "lease-rebase", expAt(), coverAll); err != nil {
+		t.Fatal(err)
+	}
+	if countAction(actions(t, e), "baseline.set") != 1 {
+		t.Fatal(actions(t, e))
+	}
+	found, err = e.Scan("secsvc", "", 0)
+	if err != nil || len(found) != 0 {
+		t.Fatalf("after rebaseline %+v %v", found, err)
 	}
 }
 
