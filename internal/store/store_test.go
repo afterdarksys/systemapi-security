@@ -1,8 +1,11 @@
 package store
 
 import (
+	"bufio"
 	"bytes"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -443,5 +446,67 @@ func TestStateReadDoesNotBlockOnFIFO(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("blocked on a FIFO")
+	}
+}
+
+func TestLockRefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "lock")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Lock(dir); codes.Code(err) != codes.BadDir {
+		t.Fatalf("followed a symlinked lock: %v", err)
+	}
+	if _, err := Open(dir, nil); codes.Code(err) != codes.BadDir {
+		t.Fatalf("open: %v", err)
+	}
+}
+
+// TestHelperOpenStore is not a test: TestOpenLocksAgainstOtherProcess runs
+// it in a child process to hold a store open.
+func TestHelperOpenStore(t *testing.T) {
+	dir := os.Getenv("SECSVC_STORE_HELPER")
+	if dir == "" {
+		t.Skip("helper")
+	}
+	if _, err := Open(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout.WriteString("held\n")
+	io.Copy(io.Discard, os.Stdin)
+}
+
+func TestOpenLocksAgainstOtherProcess(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperOpenStore$")
+	cmd.Env = append(os.Environ(), "SECSVC_STORE_HELPER="+dir)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil || line != "held\n" {
+		stdin.Close()
+		cmd.Wait()
+		t.Fatalf("helper %q %v", line, err)
+	}
+	_, oerr := Open(dir, nil)
+	stdin.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if codes.Code(oerr) != codes.StoreBusy {
+		t.Fatalf("second open: %v", oerr)
 	}
 }
