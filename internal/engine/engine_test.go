@@ -860,3 +860,53 @@ func sha256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
+
+// An open integrity_changed must not resolve when the baseline turns out to
+// be version 1 (loaded as no records): it stays open and high.
+func TestV1BaselineDoesNotResolveChange(t *testing.T) {
+	e, dir := newEng(t)
+	p := filepath.Join(dir, "w")
+	writeFile(t, p, "one")
+	putJSON(t, e, "lease-v1a", map[string]any{"watch": []string{p}}, coverAll)
+	if err := e.Baseline("actor", "lease-v1b", expAt(), coverAll); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, p, "two")
+	found, err := e.Scan("secsvc", "", 0)
+	if err != nil || len(found) != 1 || found[0].Kind != ids.KindChange {
+		t.Fatalf("change %+v %v", found, err)
+	}
+	v1 := `{"` + p + `":{"sha256":"` + sha256Hex("one") + `","mode":420,"size":3}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "baseline.json"), []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e = &Engine{Store: st, Host: "localhost", Now: func() time.Time { return frozen }}
+	found, err = e.Scan("secsvc", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var change *ids.Finding
+	for i := range found {
+		if found[i].Kind == ids.KindChange && found[i].Subject == p {
+			change = &found[i]
+		}
+	}
+	if change == nil || change.Severity != ids.SevHigh {
+		t.Fatalf("change resolved: %+v", found)
+	}
+	if countAction(actions(t, e), "ids.resolved") != 0 {
+		t.Fatal(actions(t, e))
+	}
+	// A real baseline that matches resolves it.
+	if err := e.Baseline("actor", "lease-v1c", expAt(), coverAll); err != nil {
+		t.Fatal(err)
+	}
+	found, err = e.Scan("secsvc", "", 0)
+	if err != nil || len(found) != 0 {
+		t.Fatalf("after rebaseline %+v %v", found, err)
+	}
+}

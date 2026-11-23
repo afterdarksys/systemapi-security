@@ -520,7 +520,7 @@ func (e *Engine) Scan(actor, lease string, exp int64) ([]ids.Finding, error) {
 	for _, id := range gone {
 		rec := st.Open[id]
 		disposition := modules.Disposition(rec.Kind, cfg.Modules, system)
-		if disposition == "retain" {
+		if disposition == "retain" || unbaselinedIntegrity(rec, cfg.Watch, base) {
 			continue
 		}
 		action := "ids.resolved"
@@ -541,6 +541,29 @@ func (e *Engine) Scan(actor, lease string, exp int64) ([]ids.Finding, error) {
 		return nil, err
 	}
 	return openFindings(st), nil
+}
+
+// unbaselinedIntegrity reports an open integrity finding on a watched path
+// that has no baseline record. Threats: a missing or unloadable baseline (a
+// version-1 file loads as none) must not resolve it, or a high change would
+// turn into a medium unbaselined and the next baseline would adopt the
+// changed file. It stays open until a scan against a real baseline shows the
+// file matching, or the path leaves the watch list.
+func unbaselinedIntegrity(rec store.OpenRec, watch []string, base map[string]ids.Record) bool {
+	switch rec.Kind {
+	case ids.KindChange, ids.KindMiss, ids.KindLink, ids.KindNotReg, ids.KindBig:
+	default:
+		return false
+	}
+	if _, ok := base[rec.Subject]; ok {
+		return false
+	}
+	for _, p := range watch {
+		if p == rec.Subject {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) auditFinding(actor, lease, action string, f ids.Finding, now time.Time) error {
