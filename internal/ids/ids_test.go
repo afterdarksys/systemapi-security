@@ -146,7 +146,7 @@ func TestIntegrity(t *testing.T) {
 		t.Fatal(f)
 	}
 	rec, err := Measure(p)
-	if err != nil || rec.Size != 3 || rec.Mode != 0o640 || len(rec.SHA256) != 64 {
+	if err != nil || rec.Size != 3 || rec.Mode != unix.S_IFREG|0o640 || rec.UID != uint32(os.Getuid()) || rec.GID != uint32(os.Getgid()) || len(rec.SHA256) != 64 {
 		t.Fatalf("%+v %v", rec, err)
 	}
 	if f := Check(p, &rec); f.Kind != "" {
@@ -329,7 +329,7 @@ func TestFIFODoesNotBlock(t *testing.T) {
 		if _, err := hashOpen(fifo); codes.Code(err) != codes.NotRegular {
 			t.Errorf("hashOpen: %v", err)
 		}
-		if _, err := openRegular(fifo); codes.Code(err) != codes.NotRegular {
+		if _, _, err := openRegular(fifo); codes.Code(err) != codes.NotRegular {
 			t.Errorf("openRegular: %v", err)
 		}
 		if f := Check(fifo, &Record{SHA256: strings.Repeat("a", 64)}); f.Kind != KindNotReg || f.Severity != SevHigh {
@@ -341,3 +341,79 @@ func TestFIFODoesNotBlock(t *testing.T) {
 		}
 	})
 }
+
+func TestIntegrityFullMode(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f")
+	if err := os.WriteFile(p, []byte("one"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := Measure(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mode := range []os.FileMode{0o750 | os.ModeSetuid, 0o750 | os.ModeSetgid, 0o750 | os.ModeSticky} {
+		if err := os.Chmod(p, mode); err != nil {
+			t.Fatal(err)
+		}
+		if f := Check(p, &rec); f.Kind != KindChange || f.Severity != SevHigh || f.Summary != "mode or owner changed" {
+			t.Fatalf("%v: %+v", mode, f)
+		}
+	}
+	if err := os.Chmod(p, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if f := Check(p, &rec); f.Kind != "" {
+		t.Fatal(f)
+	}
+	for name, edit := range map[string]func(r *Record){
+		"uid":  func(r *Record) { r.UID++ },
+		"gid":  func(r *Record) { r.GID++ },
+		"type": func(r *Record) { r.Mode = r.Mode&^unix.S_IFMT | unix.S_IFIFO },
+	} {
+		r := rec
+		edit(&r)
+		if f := Check(p, &r); f.Kind != KindChange {
+			t.Fatalf("%s: %+v", name, f)
+		}
+	}
+}
+
+func TestUpgradeKeepsV1Fields(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f")
+	if err := os.WriteFile(p, []byte("one"), 0o640|os.ModeSetuid); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, 0o640|os.ModeSetuid); err != nil {
+		t.Fatal(err)
+	}
+	cur, err := Measure(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1 := Record{SHA256: cur.SHA256, Mode: 0o640, Size: cur.Size}
+	up := Upgrade(p, v1)
+	if up != cur {
+		t.Fatalf("upgrade %+v want %+v", up, cur)
+	}
+	if f := Check(p, &up); f.Kind != "" {
+		t.Fatal(f)
+	}
+	// A content change made before the upgrade still shows after it.
+	stale := Record{SHA256: strings.Repeat("a", 64), Mode: 0o640, Size: cur.Size}
+	if f := Check(p, ptr(Upgrade(p, stale))); f.Kind != KindChange {
+		t.Fatal(f)
+	}
+	// So does a permission change.
+	if f := Check(p, ptr(Upgrade(p, Record{SHA256: cur.SHA256, Mode: 0o600, Size: cur.Size}))); f.Kind != KindChange {
+		t.Fatal(f)
+	}
+	// An unreadable path keeps a regular type with uid and gid 0.
+	gone := Upgrade(filepath.Join(dir, "nope"), v1)
+	if gone.Mode != unix.S_IFREG|0o640 || gone.UID != 0 || gone.GID != 0 || gone.SHA256 != v1.SHA256 {
+		t.Fatalf("%+v", gone)
+	}
+}
+
+func ptr(r Record) *Record { return &r }

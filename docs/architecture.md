@@ -82,7 +82,7 @@ Mode `0700`. Files are mode `0600`.
 | --- | --- |
 | `config.json` | `auth_log`, `auth_fail_limit`, `auth_window_s`, `watch`, `listen_allow`, `modules` |
 | `contact` | the ntfy contact string |
-| `baseline.json` | SHA-256 records for watched paths |
+| `baseline.json` | `{"v":2,"records":{...}}`: per watched path, SHA-256, size, full mode, uid, gid |
 | `ids-state.json` | offsets, open findings, coalesce times, last scan |
 | `spent.json` | lease id to expiry |
 | `audit.jsonl` | hash chain |
@@ -105,7 +105,7 @@ Three detectors, off until configured.
 
 Auth tail reads `auth_log` from a stored offset. Matching is a fixed substring list. The raw line is not a finding. Five failures in 300 seconds is the default, and the finding is `auth_fail` at severity `high`. An unreadable log suppresses `auth_fail` for that scan and records `auth_log_unavailable` at `medium`.
 
-Integrity `Lstat`s each watch path and does not follow a symlink. A symlink, a missing baselined path, a changed hash, or an unreadable baselined file is `high`. An unbaselined path is `medium`. `POST /v1/baseline` measures the current watch list. Every open of a configured path, by a scan or by the status probe, is `O_NONBLOCK|O_NOFOLLOW` and checks with fstat that the file is regular before any read; a FIFO, socket, or device is `integrity_not_file` (or `auth_log_unavailable`, or a capability `unreadable`) with internal code `not_regular`, never a blocking read. Reads are capped (1 MiB per auth scan, 4 MiB per hashed file).
+Integrity `Lstat`s each watch path and does not follow a symlink. A symlink, a missing baselined path, a changed hash or size, a changed mode (file type, setuid, setgid, sticky, or permission bits), uid, or gid, or an unreadable baselined file is `high`. A version-1 baseline (permission bits only) is upgraded once, on the next scan, with a `baseline.upgraded` audit row: its hash, size, and permission bits are kept, so a change made before the upgrade is still a finding, and the type, setuid, setgid, sticky, uid, and gid are read from the file at that moment. An unbaselined path is `medium`. `POST /v1/baseline` measures the current watch list. Every open of a configured path, by a scan or by the status probe, is `O_NONBLOCK|O_NOFOLLOW` and checks with fstat that the file is regular before any read; a FIFO, socket, or device is `integrity_not_file` (or `auth_log_unavailable`, or a capability `unreadable`) with internal code `not_regular`, never a blocking read. Reads are capped (1 MiB per auth scan, 4 MiB per hashed file).
 
 Listeners decode `/proc/net/tcp` and `/proc/net/tcp6` only when `listen_allow` is non-empty. An address outside that list is `listen_unexpected` at `high`. A truncated table is `listen_truncated` at `medium`. A decode failure is `unsupported`, so a partial table is not treated as clean.
 

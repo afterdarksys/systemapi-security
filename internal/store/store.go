@@ -104,6 +104,7 @@ type Store struct {
 	dir     string
 	cfg     Config
 	base    map[string]ids.Record
+	baseV   int
 	ids     IDSState
 	spent   map[string]int64
 	chain   *audit.Chain
@@ -125,7 +126,7 @@ func Open(dir string, parse func(string) error) (*Store, error) {
 	if err := ProbePaths(cfg); err != nil {
 		return nil, err
 	}
-	base, err := s.loadBaseline()
+	base, baseV, err := s.loadBaseline()
 	if err != nil {
 		return nil, err
 	}
@@ -150,6 +151,7 @@ func Open(dir string, parse func(string) error) (*Store, error) {
 	}
 	s.cfg = cfg
 	s.base = base
+	s.baseV = baseV
 	s.ids = st
 	s.spent = spent
 	s.chain = chain
@@ -188,6 +190,14 @@ func (s *Store) Baseline() map[string]ids.Record {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return cloneBase(s.base)
+}
+
+// BaselineLegacy reports a version-1 baseline that the engine must upgrade
+// once, with an audit row, before comparing.
+func (s *Store) BaselineLegacy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.baseV < ids.BaselineVersion
 }
 
 // IDS returns a copy of the detector memory.
@@ -294,7 +304,7 @@ func (s *Store) PutBaseline(m map[string]ids.Record) error {
 			return codes.E(codes.BadPath)
 		}
 	}
-	b, err := codes.Marshal(m)
+	b, err := codes.Marshal(baselineFile{V: ids.BaselineVersion, Records: m})
 	if err != nil {
 		return codes.E(codes.Failed)
 	}
@@ -302,6 +312,7 @@ func (s *Store) PutBaseline(m map[string]ids.Record) error {
 		return err
 	}
 	s.base = cloneBase(m)
+	s.baseV = ids.BaselineVersion
 	return nil
 }
 
@@ -672,21 +683,44 @@ func freshConfig() Config {
 	return Config{AuthFailLimit: defFailLimit, AuthWindowS: defWindowS, Watch: []string{}, ListenAllow: []string{}}
 }
 
-func (s *Store) loadBaseline() (map[string]ids.Record, error) {
+// baselineFile is baseline.json from version 2 on. Version 1 was the bare
+// path-to-record map.
+type baselineFile struct {
+	V       int                   `json:"v"`
+	Records map[string]ids.Record `json:"records"`
+}
+
+// loadBaseline returns the records and the format version. A missing file is
+// an empty current baseline.
+func (s *Store) loadBaseline() (map[string]ids.Record, int, error) {
 	b, err := readState(filepath.Join(s.dir, "baseline.json"), fileMax)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]ids.Record{}, nil
+			return map[string]ids.Record{}, ids.BaselineVersion, nil
 		}
-		return nil, err
+		return nil, 0, err
 	}
 	if len(bytes.TrimSpace(b)) == 0 {
-		return nil, codes.E(codes.Failed)
+		return nil, 0, codes.E(codes.Failed)
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	var raw map[string]json.RawMessage
 	if err := dec.Decode(&raw); err != nil || dec.More() {
-		return nil, codes.E(codes.Failed)
+		return nil, 0, codes.E(codes.Failed)
+	}
+	version := 1
+	if _, ok := raw["v"]; ok {
+		dec := json.NewDecoder(bytes.NewReader(b))
+		dec.DisallowUnknownFields()
+		var f struct {
+			V       int                        `json:"v"`
+			Records map[string]json.RawMessage `json:"records"`
+		}
+		if err := dec.Decode(&f); err != nil || dec.More() || f.V != ids.BaselineVersion {
+			return nil, 0, codes.E(codes.Failed)
+		}
+		version = f.V
+		raw = f.Records
 	}
 	if raw == nil {
 		raw = map[string]json.RawMessage{}
@@ -694,20 +728,23 @@ func (s *Store) loadBaseline() (map[string]ids.Record, error) {
 	out := make(map[string]ids.Record, len(raw))
 	for p, msg := range raw {
 		if !paths.IsAbsClean(p) || paths.IsRoot(p) {
-			return nil, codes.E(codes.BadPath)
+			return nil, 0, codes.E(codes.BadPath)
 		}
 		rd := json.NewDecoder(bytes.NewReader(msg))
 		rd.DisallowUnknownFields()
 		var rec ids.Record
 		if err := rd.Decode(&rec); err != nil || rd.More() {
-			return nil, codes.E(codes.Failed)
+			return nil, 0, codes.E(codes.Failed)
 		}
 		if !hex64(rec.SHA256) || rec.Size < 0 {
-			return nil, codes.E(codes.Failed)
+			return nil, 0, codes.E(codes.Failed)
+		}
+		if version == 1 && (rec.Mode&^0o777 != 0 || rec.UID != 0 || rec.GID != 0) {
+			return nil, 0, codes.E(codes.Failed)
 		}
 		out[p] = rec
 	}
-	return out, nil
+	return out, version, nil
 }
 
 func (s *Store) loadIDS() (IDSState, error) {

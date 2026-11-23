@@ -61,11 +61,21 @@ type Finding struct {
 	Summary  string `json:"summary"`
 }
 
-// Record is one baselined regular file.
+// BaselineVersion is the current baseline.json format. Version 1 recorded
+// only the permission bits; version 2 records the full mode, uid, and gid.
+const BaselineVersion = 2
+
+// Record is one baselined regular file. Mode is the full st_mode: file type,
+// setuid, setgid, sticky, and permission bits.
+//
+// Threats: a chmod u+s, a chown, or a type change with the same content must
+// be integrity_changed, so every one of these fields is compared.
 type Record struct {
 	SHA256 string `json:"sha256"`
 	Mode   uint32 `json:"mode"`
 	Size   int64  `json:"size"`
+	UID    uint32 `json:"uid"`
+	GID    uint32 `json:"gid"`
 }
 
 var (
@@ -158,7 +168,7 @@ func readWindow(path string, offset int64) ([]string, int64, error) {
 	if offset < 0 || offset > fi.Size() {
 		offset = 0
 	}
-	f, err := openRegular(path)
+	f, _, err := openRegular(path)
 	if err != nil {
 		return nil, offset, err
 	}
@@ -235,10 +245,31 @@ func Check(path string, base *Record) Finding {
 	if !baselined {
 		return Finding{Kind: KindBase, Severity: SevMedium, Subject: path, Summary: "unbaselined"}
 	}
-	if rec.SHA256 != base.SHA256 || rec.Mode != base.Mode || rec.Size != base.Size {
+	if rec.SHA256 != base.SHA256 || rec.Size != base.Size {
 		return Finding{Kind: KindChange, Severity: SevHigh, Subject: path, Summary: "changed " + rec.SHA256[:12]}
 	}
+	if rec.Mode != base.Mode || rec.UID != base.UID || rec.GID != base.GID {
+		return Finding{Kind: KindChange, Severity: SevHigh, Subject: path, Summary: "mode or owner changed"}
+	}
 	return Finding{}
+}
+
+// Upgrade turns a version-1 record into a current one. What version 1 held
+// (hash, size, permission bits) is kept, so a change made before the upgrade
+// still shows on the next check. What it lacked (type, setuid, setgid, sticky,
+// uid, gid) is read from the file now. An unreadable file keeps a regular
+// type and uid and gid 0, which fails closed on the next check.
+func Upgrade(path string, v1 Record) Record {
+	out := Record{SHA256: v1.SHA256, Size: v1.Size, Mode: unix.S_IFREG | v1.Mode&0o777}
+	f, st, err := openRegular(path)
+	if err != nil {
+		return out
+	}
+	f.Close()
+	out.Mode = uint32(st.Mode)&^0o777 | v1.Mode&0o777
+	out.UID = st.Uid
+	out.GID = st.Gid
+	return out
 }
 
 func oversize(path string, baselined bool) Finding {
@@ -274,34 +305,30 @@ func Measure(path string) (Record, error) {
 
 // openRegular opens path O_NONBLOCK|O_NOFOLLOW and refuses anything fstat
 // does not call a regular file, so a FIFO never blocks the open or the read.
-func openRegular(path string) (*os.File, error) {
+func openRegular(path string) (*os.File, unix.Stat_t, error) {
+	var st unix.Stat_t
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, err
+		return nil, st, err
 	}
-	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		unix.Close(fd)
-		return nil, err
+		return nil, st, err
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		unix.Close(fd)
-		return nil, codes.E(codes.NotRegular)
+		return nil, st, codes.E(codes.NotRegular)
 	}
-	return os.NewFile(uintptr(fd), path), nil
+	return os.NewFile(uintptr(fd), path), st, nil
 }
 
 func hashOpen(path string) (Record, error) {
-	f, err := openRegular(path)
+	f, st, err := openRegular(path)
 	if err != nil {
 		return Record{}, err
 	}
 	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return Record{}, err
-	}
-	if st.Size() > FileMax {
+	if st.Size > FileMax {
 		return Record{}, errBig
 	}
 	h := sha256.New()
@@ -313,7 +340,7 @@ func hashOpen(path string) (Record, error) {
 		return Record{}, errBig
 	}
 	sum := h.Sum(nil)
-	return Record{SHA256: hex.EncodeToString(sum), Mode: uint32(st.Mode().Perm()), Size: st.Size()}, nil
+	return Record{SHA256: hex.EncodeToString(sum), Mode: uint32(st.Mode), Size: st.Size, UID: st.Uid, GID: st.Gid}, nil
 }
 
 // Detect compares listeners in tcp and tcp6 text with the allowlist.

@@ -331,7 +331,7 @@ func TestCoverageAndBaselineSpend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.TrimSpace(string(raw)) != "{}" {
+	if strings.TrimSpace(string(raw)) != `{"v":2,"records":{}}` {
 		t.Fatalf("baseline %s", raw)
 	}
 	err = e.Baseline("actor", "lease-emptyb", expAt(), coverAll)
@@ -772,4 +772,58 @@ func TestFIFOStatusAndScanDoNotBlock(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("status or scan blocked on a FIFO")
 	}
+}
+
+func TestLegacyBaselineUpgradedOnce(t *testing.T) {
+	dir := t.TempDir()
+	same := filepath.Join(dir, "same")
+	changed := filepath.Join(dir, "changed")
+	writeFile(t, same, "s")
+	writeFile(t, changed, "new")
+	if err := os.Chmod(same, os.ModeSetuid|0o644); err != nil {
+		t.Fatal(err)
+	}
+	v1 := `{"` + same + `":{"sha256":"` + sha256Hex("s") + `","mode":420,"size":1},"` +
+		changed + `":{"sha256":"` + sha256Hex("old") + `","mode":420,"size":3}}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "baseline.json"), []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := `{"watch":["` + same + `","` + changed + `"]}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &Engine{Store: st, Host: "localhost", Now: func() time.Time { return frozen }}
+	found, err := e.Scan("secsvc", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 1 || found[0].Subject != changed || found[0].Kind != ids.KindChange {
+		t.Fatalf("found %+v", found)
+	}
+	if _, err := e.Scan("secsvc", "", 0); err != nil {
+		t.Fatal(err)
+	}
+	if n := countAction(actions(t, e), "baseline.upgraded"); n != 1 {
+		t.Fatalf("upgrade rows %d", n)
+	}
+	// The setuid bit was adopted at upgrade; clearing it is now a change.
+	if err := os.Chmod(same, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	found, err = e.Scan("secsvc", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 2 {
+		t.Fatalf("found %+v", found)
+	}
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }

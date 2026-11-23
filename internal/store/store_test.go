@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -379,4 +380,49 @@ func itoa(n int64) string {
 		b[i] = '-'
 	}
 	return string(b[i:])
+}
+
+func TestBaselineVersions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "baseline.json")
+	v1 := `{"/var/lib/a":{"sha256":"` + hexOK() + `","mode":420,"size":1}}` + "\n"
+	if err := os.WriteFile(path, []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.BaselineLegacy() || s.Baseline()["/var/lib/a"].Mode != 0o644 {
+		t.Fatalf("v1 not legacy: %+v", s.Baseline())
+	}
+	if err := s.PutBaseline(s.Baseline()); err != nil {
+		t.Fatal(err)
+	}
+	if s.BaselineLegacy() {
+		t.Fatal("still legacy after put")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || !bytes.HasPrefix(raw, []byte(`{"v":2,"records":{`)) {
+		t.Fatalf("%s %v", raw, err)
+	}
+	s, err = Open(dir, nil)
+	if err != nil || s.BaselineLegacy() {
+		t.Fatalf("reopen %v", err)
+	}
+	for name, body := range map[string]string{
+		"v3":        `{"v":3,"records":{}}`,
+		"v1 tagged": `{"v":1,"records":{}}`,
+		"extra":     `{"v":2,"records":{},"x":1}`,
+		"v1 suid":   `{"/var/lib/a":{"sha256":"` + hexOK() + `","mode":2541,"size":1}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(dir, nil); err == nil {
+				t.Fatal("opened")
+			}
+		})
+	}
 }
